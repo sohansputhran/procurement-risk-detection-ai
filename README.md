@@ -13,14 +13,14 @@ python -m venv .venv && source .venv/bin/activate  # Windows: .venv\Scripts\acti
 # 2) Install dependencies
 pip install -r requirements.txt
 
-# 3) (Optional) Install pre-commit hooks
-pre-commit install
+# 3) Run the API (FastAPI on http://127.0.0.1:8000)
+python -m uvicorn procurement_risk_detection_ai.app.api.main:app --reload --port 8000
 
-# 4) Run the API (FastAPI on http://127.0.0.1:8000)
-uvicorn procurement_risk_detection_ai.app.api.main:app --app-dir src --reload --port 8000
+# 4) Run the UI (Streamlit on http://localhost:8501)
+python -m streamlit run app/ui/streamlit_app.py
 
-# 5) Run the UI (Streamlit on http://localhost:8501)
-streamlit run app/ui/streamlit_app.py
+# 5) Run Data Ingestion from World Bank
+python -m src.procurement_risk_detection_ai.pipelines.ingestion.wb_projects --rows 500 --max-pages 40 --out-dir data
 ```
 
 ### Environment
