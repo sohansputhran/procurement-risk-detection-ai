@@ -1,9 +1,4 @@
-from src.app.api.main import demo_score
-
-import sys
-
-# adding Folder_2 to the system path
-sys.path.insert(0, "src")
+from procurement_risk_detection_ai.app.api.main import demo_score
 
 
 def test_demo_score_monotonic():
