@@ -1,0 +1,45 @@
+{
+  "title": "AdverseMediaPayload",
+  "type": "object",
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "entity": {
+            "type": "string"
+          },
+          "allegation_type": {
+            "type": "string"
+          },
+          "date": {
+            "type": "string"
+          },
+          "location": {
+            "type": "string"
+          },
+          "source_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "snippet": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity",
+          "allegation_type"
+        ]
+      }
+    }
+  },
+  "required": [
+    "items"
+  ]
+}
