@@ -31,19 +31,6 @@ python -m uvicorn procurement_risk_detection_ai.app.api.main:app --reload --port
 python -m streamlit run app/ui/streamlit_app.py
 
 ```
-
-## Architecture (minimal skeleton)
-
-```
-FastAPI (uvicorn)  <-- JSON requests -->  Risk Scorer (python)
-         ^                                        |
-         |                                        v
-    Streamlit UI  -------------------------->  /v1/score
-```
-
-This will grow toward: ingestion (WB/OCDS/GDELT), feature pipelines, graph DB,
-Databricks/MLflow, and responsible AI evaluators.
-
 ## Endpoints
 
 ### Health
