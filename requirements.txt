@@ -12,3 +12,10 @@ pytest==8.3.2
 black==24.8.0
 ruff==0.6.8
 pre-commit==3.8.0
+
+pandas
+requests
+pyarrow
+lxml
+openpyxl
+tabulate

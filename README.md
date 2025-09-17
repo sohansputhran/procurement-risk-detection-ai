@@ -31,19 +31,6 @@ python -m uvicorn procurement_risk_detection_ai.app.api.main:app --reload --port
 python -m streamlit run app/ui/streamlit_app.py
 
 ```
-
-## Architecture (minimal skeleton)
-
-```
-FastAPI (uvicorn)  <-- JSON requests -->  Risk Scorer (python)
-         ^                                        |
-         |                                        v
-    Streamlit UI  -------------------------->  /v1/score
-```
-
-This will grow toward: ingestion (WB/OCDS/GDELT), feature pipelines, graph DB,
-Databricks/MLflow, and responsible AI evaluators.
-
 ## Endpoints
 
 ### Health
@@ -123,7 +110,21 @@ World Bank Projects → JSONL + Parquet:
 python -m procurement_risk_detection_ai.pipelines.ingestion.wb_projects   --rows 500 --max-pages 40 --out-dir data
 ```
 
-Planned public sources:
+### World Bank Ineligible (Sanctions) → JSONL + Parquet
+You can point to the official landing page (auto-discovery) **or** use a **local Excel** you downloaded.
+
+**Recommended: local Excel path (most reliable)**
+```bash
+python -m procurement_risk_detection_ai.pipelines.ingestion.wb_ineligible --xlsx-file "<File Location>.xlsx" --out-dir data
+```
+
+**Outputs**
+- Raw JSON Lines: `data/raw/worldbank/ineligible_YYYYMMDDTHHMMSSZ.jsonl`
+- Curated Parquet: `data/curated/worldbank/ineligible.parquet`
+
+---
+
+Public sources:
 - **World Bank**: Projects & Operations, Documents & Reports (public APIs)
 - **Open Contracting Data Standard (OCDS)** publishers via OCP Data Registry
 - **GDELT DOC API** for adverse-media titles/URLs/snippets (no API key)
@@ -163,8 +164,8 @@ pytest -q
 ## Roadmap (Agile)
 
 - **Sprint 1 – Ingestion & Feature Seeds**
-  - World Bank Projects ingest → Parquet
-  - World Bank Ineligible (sanctions) ingest
+  - World Bank Projects ingest → Parquet ✅
+  - World Bank Ineligible (sanctions) ingest ✅
   - OCDS sample publisher ingest
   - GDELT DOC fetcher
   - Seed contract features (award concentration, repeat-winner, near-threshold, z-scores)
@@ -177,6 +178,28 @@ pytest -q
 - **Sprint 3 – App & Responsible AI**
   - Batch scoring endpoint + dataset dashboard
   - Model card, data sheet, provenance logging
+
+---
+
+## Troubleshooting
+
+- **`ModuleNotFoundError: No module named 'procurement_risk_detection_ai'`**
+  Ensure you ran `pip install -e .` and your tests import via the package path (not `src.`).
+  If needed, add a `pytest.ini` with:
+  ```ini
+  [pytest]
+  pythonpath =
+      src
+  ```
+
+- **`requests.exceptions.ConnectionError` when passing a URL with `< >`**
+  `<...>` are placeholders; paste the real `https://… .xlsx` URL or use `--xlsx-file`.
+
+- **`AttributeError: pandas.io.json has no attribute dumps`**
+  We write JSONL via `DataFrame.to_json(..., lines=True)`.
+
+- **Parquet engine error (pyarrow/fastparquet not installed)**
+  `pip install pyarrow`.
 
 ---
 
