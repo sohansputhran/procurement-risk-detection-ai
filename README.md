@@ -104,30 +104,52 @@ print(resp.parsed or resp.text)
 
 ## Public data ingestion
 
-World Bank Projects → JSONL + Parquet:
-
+### World Bank — Projects → JSONL + Parquet
 ```bash
 python -m procurement_risk_detection_ai.pipelines.ingestion.wb_projects   --rows 500 --max-pages 40 --out-dir data
 ```
 
-### World Bank Ineligible (Sanctions) → JSONL + Parquet
-You can point to the official landing page (auto-discovery) **or** use a **local Excel** you downloaded.
-
-**Recommended: local Excel path (most reliable)**
-```bash
-python -m procurement_risk_detection_ai.pipelines.ingestion.wb_ineligible --xlsx-file "<File Location>.xlsx" --out-dir data
-```
-
 **Outputs**
-- Raw JSON Lines: `data/raw/worldbank/ineligible_YYYYMMDDTHHMMSSZ.jsonl`
-- Curated Parquet: `data/curated/worldbank/ineligible.parquet`
+- `data/raw/worldbank/projects_*.jsonl`
+- `data/curated/worldbank/projects.parquet`
 
 ---
 
-Public sources:
-- **World Bank**: Projects & Operations, Documents & Reports (public APIs)
-- **Open Contracting Data Standard (OCDS)** publishers via OCP Data Registry
-- **GDELT DOC API** for adverse-media titles/URLs/snippets (no API key)
+### World Bank — Ineligible (Sanctions) → JSONL + Parquet
+Use the official **Excel** (download locally) for reliable parsing.
+
+```bash
+python -m procurement_risk_detection_ai.pipelines.ingestion.wb_ineligible --xlsx-file "C:\Users\you\Downloads\Listing of Ineligible Firms and Individuals.xlsx" --out-dir data
+```
+
+**Outputs**
+- `data/raw/worldbank/ineligible_*.jsonl`
+- `data/curated/worldbank/ineligible.parquet`
+
+---
+
+### OCDS — Release Packages / JSONL feeds → Parquet
+The loader supports **`.json` / `.json.gz`** (single package) **and** **`.jsonl` / `.jsonl.gz`** (line‑delimited releases).
+
+#### From URL (JSONL.GZ — large feeds; use --take to sample)
+```bash
+# Print a sample (does not write)
+python -m procurement_risk_detection_ai.pipelines.ingestion.ocds_loader   --url "https://data.open-contracting.org/en/publication/155/download?name=full.jsonl.gz"   --print-only --take 200
+
+# Write curated parquet tables
+python -m procurement_risk_detection_ai.pipelines.ingestion.ocds_loader   --url "https://data.open-contracting.org/en/publication/155/download?name=full.jsonl.gz"   --out-dir data
+```
+
+#### From local file
+```bash
+python -m procurement_risk_detection_ai.pipelines.ingestion.ocds_loader   --path data/raw/ocds/releases.jsonl.gz   --out-dir data
+```
+
+**Outputs**
+- `data/curated/ocds/tenders.parquet`
+- `data/curated/ocds/awards.parquet`
+- `data/curated/ocds/suppliers.parquet`
+- `data/raw/ocds/ocds_counts_*.json` (counts snapshot)
 
 ---
 
@@ -161,46 +183,46 @@ pip install pytest
 pytest -q
 ```
 
-## Roadmap (Agile)
-
-- **Sprint 1 – Ingestion & Feature Seeds**
-  - World Bank Projects ingest → Parquet ✅
-  - World Bank Ineligible (sanctions) ingest ✅
-  - OCDS sample publisher ingest
-  - GDELT DOC fetcher
-  - Seed contract features (award concentration, repeat-winner, near-threshold, z-scores)
-
-- **Sprint 2 – Graph & Model**
-  - NetworkX prototype (buyer–award–supplier)
-  - Centralities + distance-to-sanctioned
-  - Replace heuristic with an ML model + basic explanations
-
-- **Sprint 3 – App & Responsible AI**
-  - Batch scoring endpoint + dataset dashboard
-  - Model card, data sheet, provenance logging
-
----
-
 ## Troubleshooting
 
-- **`ModuleNotFoundError: No module named 'procurement_risk_detection_ai'`**
-  Ensure you ran `pip install -e .` and your tests import via the package path (not `src.`).
-  If needed, add a `pytest.ini` with:
+- **`ModuleNotFoundError: procurement_risk_detection_ai`**
+  Run `pip install -e .`; ensure tests import via the package path (not `src.`).
+  Add a `pytest.ini` if needed:
   ```ini
   [pytest]
   pythonpath =
       src
   ```
 
-- **`requests.exceptions.ConnectionError` when passing a URL with `< >`**
-  `<...>` are placeholders; paste the real `https://… .xlsx` URL or use `--xlsx-file`.
+- **JSON/JSONL decode errors on OCDS URL**
+  Feed URLs like `*.jsonl.gz` are line‑delimited. The loader detects JSONL/JSONL.GZ and wraps lines into a releases package. Use `--take` while testing.
 
-- **`AttributeError: pandas.io.json has no attribute dumps`**
-  We write JSONL via `DataFrame.to_json(..., lines=True)`.
+- **Parquet engine error**
+  Install `pyarrow`.
 
-- **Parquet engine error (pyarrow/fastparquet not installed)**
-  `pip install pyarrow`.
+- **Excel read error**
+  Install `openpyxl` and ensure you used `--xlsx-file` with a real `.xlsx` path.
 
+---
+
+## Roadmap (Agile)
+
+- **Sprint 1 – Ingestion & Feature Seeds**
+  - World Bank Projects ingest → Parquet ✅
+  - World Bank Ineligible (sanctions) ingest ✅
+  - OCDS ingest (Release Package & JSONL/GZ) ✅
+  - GDELT DOC fetcher
+  - Seed contract features (award concentration, repeat‑winner, near‑threshold, z‑scores)
+
+- **Sprint 2 – Graph & Model**
+  - NetworkX prototype (buyer–award–supplier)
+  - Centralities + distance‑to‑sanctioned
+  - Replace heuristic with an ML model + basic explanations
+
+- **Sprint 3 – App & Responsible AI**
+  - Batch scoring endpoint + dataset dashboard
+  - Model card, data sheet, provenance logging
+  - Responsible AI controls & prompts for LLM extraction
 ---
 
 ## Environment variables
