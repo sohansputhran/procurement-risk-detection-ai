@@ -1,9 +1,11 @@
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 from .batch import router as batch_router
+from .health import router as health_router
 
 app = FastAPI(title="Procurement Risk Detection AI API", version="0.1.0")
 app.include_router(batch_router)
+app.include_router(health_router)
 
 
 class ScoreRequest(BaseModel):

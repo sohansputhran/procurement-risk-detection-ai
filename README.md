@@ -3,7 +3,7 @@
 Cloud-native, investigator-friendly analytics to surface integrity risks in public procurement using **public data** and **Google Gemini** for structured extraction.
 
 - **API:** FastAPI (`/health`, `/v1/score`, `/v1/extract/adverse-media`, `/v1/score/batch`)
-- **UI:** Streamlit demo
+- **UI:** Streamlit demo (now includes a **Datasets & Batch Scoring** page)
 - **LLM:** Google GenAI SDK (Gemini) with strict, schema-validated JSON output
 - **Layout:** `src/` package (editable install)
 
@@ -40,10 +40,32 @@ PowerShell aliases `curl` to `Invoke-WebRequest`. For JSON POSTs, either:
 
 ## Endpoints
 
-### Health
+### Health (datasets probe)
 ```
 GET /health
-→ { "status": "ok" }
+```
+Returns API version and row counts/availability for configured datasets:
+```json
+{
+  "status": "ok",
+  "api_version": "…",
+  "datasets": {
+    "features":        {"path": ".../contracts_features.parquet", "rows": 12345, "available": true},
+    "graph_metrics":   {"path": ".../metrics.parquet",            "rows": 6789,  "available": true},
+    "wb_ineligible":   {"path": ".../ineligible.parquet",         "rows": 321,   "available": true},
+    "ocds_tenders":    {"path": ".../tenders.parquet",            "rows": 1000,  "available": true},
+    "ocds_awards":     {"path": ".../awards.parquet",             "rows": 1000,  "available": true}
+  }
+}
+```
+
+Environment overrides (optional):
+```
+FEATURES_PATH=data/feature_store/contracts_features.parquet
+GRAPH_METRICS_PATH=data/graph/metrics.parquet
+WB_INELIGIBLE_PATH=data/curated/worldbank/ineligible.parquet
+OCDS_TENDERS_PATH=data/curated/ocds/tenders.parquet
+OCDS_AWARDS_PATH=data/curated/ocds/awards.parquet
 ```
 
 ### Risk score (demo heuristic)
@@ -64,92 +86,40 @@ Content-Type: application/json
 POST /v1/extract/adverse-media
 Content-Type: application/json
 { "text": "…paste a news paragraph or snippet…" }
-
-→ {
-  "items": [
-    {
-      "entity": "ACME Contractors",
-      "allegation_type": "bid-rigging",
-      "date": "2023-08-14",
-      "location": "Lagos",
-      "source_url": "https://example.com/news/acme-riverbridge-collusion",
-      "confidence": 0.82,
-      "snippet": "…"
-    }
-  ]
-}
 ```
 
 ### Batch scoring (features merge + top-factor attributions)
 Compute scores for many awards at once by merging prebuilt features and (optionally) **graph metrics**.
 
 **Prerequisites**
-1) **Build features** (now includes `supplier_id` for graph join):
+1) **Build features** (includes `supplier_id` for graph join):
 ```bash
 python -m procurement_risk_detection_ai.pipelines.features.contracts_features   --tenders data/curated/ocds/tenders.parquet   --awards  data/curated/ocds/awards.parquet   --out     data/feature_store/contracts_features.parquet
 ```
-2) *(Optional, recommended)* **Build graph metrics** (buyers ↔ suppliers + distance-to-sanctioned):
+2) *(Optional)* **Build graph metrics**:
 ```bash
 python -m procurement_risk_detection_ai.graph.graph_utils   --tenders  data/curated/ocds/tenders.parquet   --awards   data/curated/ocds/awards.parquet   --sanctions data/curated/worldbank/ineligible.parquet   --out-dir  data
 ```
 
-**PowerShell (recommended call):**
-```powershell
-$body = @(
-  @{ award_id = "A1" }
-  @{ award_id = "A2" }
-) | ConvertTo-Json -Depth 4
-
-Invoke-RestMethod `
-  -Uri "http://127.0.0.1:8000/v1/score/batch" `
-  -Method POST `
-  -ContentType "application/json" `
-  -Body $body
-```
-
-**curl.exe (Windows) with a file:**
-```powershell
-@"
-[
-  {"award_id":"A1"},
-  {"award_id":"A2"}
-]
-"@ | Set-Content -NoNewline -Path payload.json
-
-curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch" `
-  -H "Content-Type: application/json" `
-  --data-binary "@payload.json"
-```
-
 **Swagger UI:** open `http://127.0.0.1:8000/docs` → `POST /v1/score/batch`.
 
-Environment overrides:
+---
+
+## Streamlit — Datasets & Batch Scoring page
+
+Path: `app/ui/pages/1_Datasets.py`
+
+- Shows **dataset availability** and **row counts** by calling `/health`.
+- Lets you **upload a CSV** with an `award_id` column to call `/v1/score/batch` and view results (plus a quick bar chart of top risks).
+
+Set the API base URL for the UI:
 ```
-FEATURES_PATH=data/feature_store/contracts_features.parquet
-GRAPH_METRICS_PATH=data/graph/metrics.parquet  # optional
+API_URL=http://127.0.0.1:8000
 ```
 
-**What happens under the hood**
-- The endpoint merges your request with **features by `award_id`**.
-- If `GRAPH_METRICS_PATH` exists and both sides have `supplier_id`, it **left‑joins graph metrics by `supplier_id`**.
-- A weighted score in `[0,1]` is returned along with top contributing factors.
-  When graph metrics are present, `adjacency_to_sanctioned` (derived from `distance_to_sanctioned`) contributes.
-
-Response example:
-```json
-[
-  {
-    "award_id": "A1",
-    "risk_score": 0.73,
-    "top_factors": {
-      "award_concentration_by_buyer": 0.30,
-      "amount_zscore_by_category_norm": 0.20,
-      "adjacency_to_sanctioned": 0.15
-    },
-    "provenance": { "features": "data/feature_store/contracts_features.parquet", "graph_metrics": "data/graph/metrics.parquet", "ts": "..." },
-    "warnings": null
-  }
-]
+Run the UI:
+```bash
+python -m streamlit run app/ui/streamlit_app.py
 ```
 
 ---
@@ -160,7 +130,6 @@ Response example:
 - Key: `GEMINI_API_KEY` (environment variable)
 
 Minimal example (already wired in the API):
-
 ```python
 from google import genai
 from procurement_risk_detection_ai.llm.gemini_client import AdverseMediaPayload
@@ -171,7 +140,7 @@ resp = client.models.generate_content(
     contents="Extract adverse media for ACME bribery at http://example.com",
     config={
         "response_mime_type": "application/json",
-        "response_schema": AdverseMediaPayload,  # strict schema
+        "response_schema": AdverseMediaPayload,
     },
 )
 print(resp.parsed or resp.text)
@@ -194,95 +163,57 @@ print(resp.parsed or resp.text)
 python -m procurement_risk_detection_ai.pipelines.ingestion.wb_projects   --rows 500 --max-pages 40 --out-dir data
 ```
 
-**Outputs**
-- `data/raw/worldbank/projects_*.jsonl`
-- `data/curated/worldbank/projects.parquet`
-
----
-
 ### World Bank — Ineligible (Sanctions) → JSONL + Parquet
 Use the official **Excel** (download locally) for reliable parsing.
-
 ```bash
-# Windows example path
 python -m procurement_risk_detection_ai.pipelines.ingestion.wb_ineligible   --xlsx-file "C:\Users\you\Downloads\Listing of Ineligible Firms and Individuals.xlsx"   --out-dir data
 ```
 
-**Outputs**
-- `data/raw/worldbank/ineligible_*.jsonl`
-- `data/curated/worldbank/ineligible.parquet`
-
----
-
 ### OCDS — Release Packages / JSONL feeds → Parquet
-The loader supports **`.json` / `.json.gz`** (single package) **and** **`.jsonl` / `.jsonl.gz`** (line‑delimited releases).
-
-#### From URL (JSONL.GZ — large feeds; use --take to sample)
+From URL (JSONL.GZ — use `--take` to sample):
 ```bash
-# Print a sample (does not write)
 python -m procurement_risk_detection_ai.pipelines.ingestion.ocds_loader   --url "https://data.open-contracting.org/en/publication/155/download?name=full.jsonl.gz"   --print-only --take 200
-
-# Write curated parquet tables
 python -m procurement_risk_detection_ai.pipelines.ingestion.ocds_loader   --url "https://data.open-contracting.org/en/publication/155/download?name=full.jsonl.gz"   --out-dir data
 ```
-
-#### From local file
+From local file:
 ```bash
 python -m procurement_risk_detection_ai.pipelines.ingestion.ocds_loader   --path data/raw/ocds/releases.jsonl.gz   --out-dir data
 ```
 
-**Outputs**
+**Curated outputs**
 - `data/curated/ocds/tenders.parquet`
 - `data/curated/ocds/awards.parquet`
 - `data/curated/ocds/suppliers.parquet`
-- `data/raw/ocds/ocds_counts_*.json` (counts snapshot)
 
 ---
 
 ## Features — Contract-level feature seeds
 
-Build features from curated OCDS outputs for use by `/v1/score/batch`.
-
 ```bash
 python -m procurement_risk_detection_ai.pipelines.features.contracts_features   --tenders data/curated/ocds/tenders.parquet   --awards  data/curated/ocds/awards.parquet   --out     data/feature_store/contracts_features.parquet
 ```
-
-**Outputs**
+Outputs:
 - `data/feature_store/contracts_features.parquet`
-  Columns include:
-  - `award_id`
-  - **`supplier_id`** ← used to join graph metrics
-  - `award_concentration_by_buyer`
-  - `repeat_winner_ratio`
-  - `amount_zscore_by_category`
-  - `near_threshold_flag`
-  - `time_to_award_days`
-
-> **Upgrade note:** If your old features file lacks `supplier_id`, rebuild with the current script so the batch API can join graph metrics.
+  - `award_id`, **`supplier_id`**, `award_concentration_by_buyer`, `repeat_winner_ratio`,
+    `amount_zscore_by_category`, `near_threshold_flag`, `time_to_award_days`
 
 ---
 
 ## Graph metrics — buyers ↔ suppliers + distance-to-sanctioned
 
-Build a bipartite graph from OCDS, compute supplier centralities and **distance to sanctioned** (via name matching to the World Bank ineligible list).
-
-**Run**
 ```bash
 python -m procurement_risk_detection_ai.graph.graph_utils   --tenders  data/curated/ocds/tenders.parquet   --awards   data/curated/ocds/awards.parquet   --sanctions data/curated/worldbank/ineligible.parquet   --out-dir  data   --ego-supplier-id S1           # optional (saves an ego PNG)
-# For faster runs on big graphs, skip betweenness:
-#   add --no-betweenness
+# For faster runs on big graphs, skip betweenness with --no-betweenness
 ```
 
-**Outputs**
-- `data/graph/metrics.parquet` (columns: `supplier_id`, `supplier_name`, `degree`, `betweenness`, `distance_to_sanctioned`)
-- `data/graph/ego_<supplier_id>.png` (optional, if `--ego-supplier-id` is used)
+Outputs:
+- `data/graph/metrics.parquet` (`supplier_id`, `supplier_name`, `degree`, `betweenness`, `distance_to_sanctioned`)
+- `data/graph/ego_<supplier_id>.png` (optional)
 
-**Notes**
-- If you see `AttributeError: module 'networkx' has no attribute 'multi_source_shortest_path_length'`, you’re on an older NetworkX. Upgrade with:
-  ```bash
-  pip install --upgrade "networkx>=3.0"
-  ```
-  The module also includes a **fallback** that combines single-source BFS when that function isn’t available—upgrading is recommended for performance.
+If you see a NetworkX “multi_source_shortest_path_length” error, upgrade:
+```
+pip install --upgrade "networkx>=3.0"
+```
 
 ---
 
@@ -291,11 +222,12 @@ python -m procurement_risk_detection_ai.graph.graph_utils   --tenders  data/cura
 ```
 .github/workflows/                # CI
 app/ui/                           # Streamlit demo
+  pages/                          # 1_Datasets.py
 data/                             # raw/ & curated/ outputs (git-ignored except .gitkeep)
 docs/                             # architecture, notes
 llm/schemas/                      # JSON/Pydantic schemas
 src/procurement_risk_detection_ai/
-  app/api/                        # FastAPI app
+  app/api/                        # FastAPI app (health, batch, etc.)
   llm/                            # Gemini wrapper (structured output)
   pipelines/ingestion/            # public-data ingesters (WB/OCDS/GDELT)
   pipelines/features/             # feature builders
@@ -329,25 +261,15 @@ pytest -q
   ```
 
 - **JSON/JSONL decode errors on OCDS URL**
-  Feeds like `*.jsonl.gz` are line‑delimited. The loader detects JSONL/JSONL.GZ and wraps lines into a releases package. Use `--take` while testing.
+  Feeds like `*.jsonl.gz` are line‑delimited. Use `--take` for sampling.
 
-- **422 Unprocessable Entity on batch**
-  Ensure the POST body is a JSON **array** (see examples above). In PowerShell, prefer `Invoke-RestMethod` or `curl.exe --data-binary @file.json`.
+- **422/503 or JSON errors on batch**
+  - Ensure the POST body is a JSON **array** (`[{ "award_id": "A1" }, …]`).
+  - Rebuild features so `supplier_id` exists for graph joins.
+  - Install `pyarrow` (Parquet) and `openpyxl` (Excel) as needed.
 
-- **503 Features not available…**
-  Ensure you rebuilt features with the current script so `supplier_id` exists in the parquet.
-
-- **Graph metrics not affecting score**
-  Confirm `data/graph/metrics.parquet` exists and has `supplier_id` + `distance_to_sanctioned`; check `GRAPH_METRICS_PATH`.
-
-- **500 / NaN or Infinity in JSON**
-  The API sanitizes numbers, but if you derive your own scores ensure you don’t return NaN/Inf (JSON-invalid).
-
-- **Parquet engine error**
-  Install `pyarrow`.
-
-- **Excel read error**
-  Install `openpyxl` and ensure you used `--xlsx-file` with a real `.xlsx` path.
+- **UI cannot reach API**
+  Set `API_URL` (env or `.env`) to your running FastAPI base URL.
 
 ---
 
@@ -360,6 +282,9 @@ API_URL=http://127.0.0.1:8000
 GEMINI_API_KEY=your_key_here
 FEATURES_PATH=data/feature_store/contracts_features.parquet
 GRAPH_METRICS_PATH=data/graph/metrics.parquet
+WB_INELIGIBLE_PATH=data/curated/worldbank/ineligible.parquet
+OCDS_TENDERS_PATH=data/curated/ocds/tenders.parquet
+OCDS_AWARDS_PATH=data/curated/ocds/awards.parquet
 ```
 
 ---
