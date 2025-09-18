@@ -3,15 +3,16 @@
 Feature Seeds v1 for contract/award-level risk signals.
 
 Inputs (from curated OCDS parquet):
-- data/curated/ocds/tenders.parquet  (tender_id, buyer_name, main_category, method, status, value_amount, value_currency, cpv_ids, tender_date)
+- data/curated/ocds/tenders.parquet  (tender_id, buyer_name, main_category, tender_date)
 - data/curated/ocds/awards.parquet   (award_id, tender_id, supplier_id, supplier_name, amount, currency, date, status)
 
 Outputs:
 - data/feature_store/contracts_features.parquet, keyed by award_id with:
+  - supplier_id: for joining graph metrics
   - award_concentration_by_buyer: share of a buyer's awards that went to this supplier (0..1)
-  - repeat_winner_ratio: awards to supplier by buyer / total awards by buyer (alias of concentration; kept for clarity)
+  - repeat_winner_ratio: same metric (alias kept for clarity)
   - amount_zscore_by_category: z-score of award amount within main_category
-  - near_threshold_flag: 1 if amount within ±5% of a generic threshold bucket (10k, 50k, 250k, 1M)
+  - near_threshold_flag: 1 if amount within ±5% of {10k, 50k, 250k, 1M}
   - time_to_award_days: (award_date - tender_date) in days, clipped at [0, 3650]
 """
 from __future__ import annotations
@@ -109,7 +110,6 @@ def build_features(tenders_path: str, awards_path: str) -> pd.DataFrame:
     )
 
     # --- award_concentration_by_buyer & repeat_winner_ratio ---
-    # Compute per-buyer share of awards for each supplier
     grp = (
         df.groupby(["buyer_name", "supplier_id"], dropna=False)
         .size()
@@ -146,14 +146,13 @@ def build_features(tenders_path: str, awards_path: str) -> pd.DataFrame:
     # --- time_to_award_days ---
     delta = (df["date"] - df["tender_date"]).dt.days
     df["time_to_award_days"] = delta.clip(lower=0).fillna(0).astype(int)
-    df["time_to_award_days"] = df["time_to_award_days"].clip(
-        upper=3650
-    )  # cap at ~10 years to avoid outliers
+    df["time_to_award_days"] = df["time_to_award_days"].clip(upper=3650)
 
     features = (
         df[
             [
                 "award_id",
+                "supplier_id",  # <-- for graph join
                 "award_concentration_by_buyer",
                 "repeat_winner_ratio",
                 "amount_zscore_by_category",
