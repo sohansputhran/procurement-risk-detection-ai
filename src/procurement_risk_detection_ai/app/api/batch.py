@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import os
+import math
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
-import math
 
 import pandas as pd
 from fastapi import APIRouter
@@ -12,11 +12,17 @@ from pydantic import BaseModel, Field
 
 router = APIRouter()
 
-# ---- Config via env (paths can be overridden without code changes)
-FEATURES_PATH = os.environ.get(
-    "FEATURES_PATH", "data/feature_store/contracts_features.parquet"
-)
-GRAPH_METRICS_PATH = os.environ.get("GRAPH_METRICS_PATH", "data/graph/metrics.parquet")
+# ---- Defaults; read env at request time (not import time)
+DEFAULT_FEATURES_PATH = "data/feature_store/contracts_features.parquet"
+DEFAULT_GRAPH_METRICS_PATH = "data/graph/metrics.parquet"
+
+
+def _get_features_path() -> str:
+    return os.environ.get("FEATURES_PATH", DEFAULT_FEATURES_PATH)
+
+
+def _get_graph_metrics_path() -> str:
+    return os.environ.get("GRAPH_METRICS_PATH", DEFAULT_GRAPH_METRICS_PATH)
 
 
 # ---- Request/Response Schemas
@@ -46,6 +52,14 @@ def _load_parquet(path: str) -> Optional[pd.DataFrame]:
 
 def _safe_float(x, default: float = 0.0) -> float:
     """Convert to float and replace NaN/Inf with default."""
+    try:
+        v = float(x)
+    except Exception:
+        return default
+    return v if math.isfinite(v) else default
+
+
+def _safe_float(x, default: float = 0.0) -> float:
     try:
         v = float(x)
     except Exception:
@@ -146,20 +160,22 @@ def score_batch(items: List[BatchItem]):
 
         raise HTTPException(status_code=400, detail="Empty request payload.")
 
-    # Load features parquet
-    feats = _load_parquet(FEATURES_PATH)
+    # Load features parquet (read path from env now)
+    features_path = _get_features_path()
+    feats = _load_parquet(features_path)
     if feats is None or feats.empty or "award_id" not in feats.columns:
         from fastapi import HTTPException
 
         raise HTTPException(
             status_code=503,
-            detail=f"Features not available at '{FEATURES_PATH}'. Build features first.",
+            detail=f"Features not available at '{features_path}'. Build features first.",
         )
     feats = feats.copy()
     feats["award_id"] = feats["award_id"].astype(str)
 
     # Optional graph metrics (join is best-effort)
-    graph = _load_parquet(GRAPH_METRICS_PATH)
+    graph_path = _get_graph_metrics_path()
+    graph = _load_parquet(graph_path)
     graph_join_key = None
     if graph is not None and not graph.empty:
         if "award_id" in graph.columns:
@@ -195,9 +211,9 @@ def score_batch(items: List[BatchItem]):
         score, top = _score_row(r, r if graph is not None else None)
 
         prov = {
-            "features": FEATURES_PATH,
+            "features": features_path,
             "features_rows": str(features_rows),
-            "graph_metrics": GRAPH_METRICS_PATH if graph is not None else "",
+            "graph_metrics": graph_path if graph is not None else "",
             "ts": now,
         }
 
