@@ -2,7 +2,7 @@
 
 Cloud-native, investigator-friendly analytics to surface integrity risks in public procurement using **public data** and **Google Gemini** for structured extraction.
 
-- **API:** FastAPI (`/health`, `/v1/score`, `/v1/extract/adverse-media`)
+- **API:** FastAPI (`/health`, `/v1/score`, `/v1/extract/adverse-media`, `/v1/score/batch`)
 - **UI:** Streamlit demo
 - **LLM:** Google GenAI SDK (Gemini) with strict, schema-validated JSON output
 - **Layout:** `src/` package (editable install)
@@ -29,8 +29,15 @@ cp .env.example .env
 # 5) Run API & UI
 python -m uvicorn procurement_risk_detection_ai.app.api.main:app --reload --port 8000
 python -m streamlit run app/ui/streamlit_app.py
-
 ```
+
+### Windows notes
+PowerShell aliases `curl` to `Invoke-WebRequest`. For JSON POSTs, either:
+- Use **PowerShell-native** (`Invoke-RestMethod`) or
+- Call **`curl.exe`** explicitly (see examples below).
+
+---
+
 ## Endpoints
 
 ### Health
@@ -73,6 +80,64 @@ Content-Type: application/json
 }
 ```
 
+### Batch scoring (features merge + top-factor attributions)
+Compute scores for many awards at once by merging prebuilt features.
+
+**Build features first** (see *Features* section), then:
+
+**PowerShell (recommended):**
+```powershell
+$body = @(
+  @{ award_id = "A1" }
+  @{ award_id = "A2" }
+) | ConvertTo-Json -Depth 4
+
+Invoke-RestMethod `
+  -Uri "http://127.0.0.1:8000/v1/score/batch" `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body $body
+```
+
+**curl.exe (Windows) with a file:**
+```powershell
+@"
+[
+  {"award_id":"A1"},
+  {"award_id":"A2"}
+]
+"@ | Set-Content -NoNewline -Path payload.json
+
+curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch" `
+  -H "Content-Type: application/json" `
+  --data-binary "@payload.json"
+```
+
+**Swagger UI:** open `http://127.0.0.1:8000/docs` → `POST /v1/score/batch`.
+
+Environment overrides:
+```
+FEATURES_PATH=data/feature_store/contracts_features.parquet
+GRAPH_METRICS_PATH=data/graph/metrics.parquet  # optional
+```
+
+Response shape (example):
+```json
+[
+  {
+    "award_id": "A1",
+    "risk_score": 0.73,
+    "top_factors": {
+      "award_concentration_by_buyer": 0.30,
+      "amount_zscore_by_category_norm": 0.20,
+      "adjacency_to_sanctioned": 0.15
+    },
+    "provenance": { "features": "data/feature_store/contracts_features.parquet", "ts": "..." },
+    "warnings": null
+  }
+]
+```
+
 ---
 
 ## LLMs: Google Gemini (public-only)
@@ -104,6 +169,12 @@ print(resp.parsed or resp.text)
 
 ## Public data ingestion
 
+> Ensure Parquet/Excel engines as needed:
+>
+> ```bash
+> pip install pyarrow openpyxl
+> ```
+
 ### World Bank — Projects → JSONL + Parquet
 ```bash
 python -m procurement_risk_detection_ai.pipelines.ingestion.wb_projects   --rows 500 --max-pages 40 --out-dir data
@@ -119,7 +190,8 @@ python -m procurement_risk_detection_ai.pipelines.ingestion.wb_projects   --rows
 Use the official **Excel** (download locally) for reliable parsing.
 
 ```bash
-python -m procurement_risk_detection_ai.pipelines.ingestion.wb_ineligible --xlsx-file "C:\Users\you\Downloads\Listing of Ineligible Firms and Individuals.xlsx" --out-dir data
+# Windows example path
+python -m procurement_risk_detection_ai.pipelines.ingestion.wb_ineligible   --xlsx-file "C:\Users\you\Downloads\Listing of Ineligible Firms and Individuals.xlsx"   --out-dir data
 ```
 
 **Outputs**
@@ -153,6 +225,19 @@ python -m procurement_risk_detection_ai.pipelines.ingestion.ocds_loader   --path
 
 ---
 
+## Features — Contract-level feature seeds
+
+Build features from curated OCDS outputs for use by `/v1/score/batch`.
+
+```bash
+python -m procurement_risk_detection_ai.pipelines.features.contracts_features   --tenders data/curated/ocds/tenders.parquet   --awards  data/curated/ocds/awards.parquet   --out     data/feature_store/contracts_features.parquet
+```
+
+**Outputs**
+- `data/feature_store/contracts_features.parquet`
+
+---
+
 ## Project structure
 
 ```
@@ -165,6 +250,7 @@ src/procurement_risk_detection_ai/
   app/api/                        # FastAPI app
   llm/                            # Gemini wrapper (structured output)
   pipelines/ingestion/            # public-data ingesters (WB/OCDS/GDELT)
+  pipelines/features/             # feature builders
 tests/                            # pytest tests
 ```
 
@@ -195,7 +281,13 @@ pytest -q
   ```
 
 - **JSON/JSONL decode errors on OCDS URL**
-  Feed URLs like `*.jsonl.gz` are line‑delimited. The loader detects JSONL/JSONL.GZ and wraps lines into a releases package. Use `--take` while testing.
+  Feeds like `*.jsonl.gz` are line‑delimited. The loader detects JSONL/JSONL.GZ and wraps lines into a releases package. Use `--take` while testing.
+
+- **422 Unprocessable Entity on batch**
+  Ensure the POST body is a JSON **array** (see examples above). In PowerShell, prefer `Invoke-RestMethod` or `curl.exe --data-binary @file.json`.
+
+- **500 / NaN or Infinity in JSON**
+  The API sanitizes numbers, but if you derive your own scores ensure you don’t return NaN/Inf (JSON‑invalid).
 
 - **Parquet engine error**
   Install `pyarrow`.
@@ -212,7 +304,7 @@ pytest -q
   - World Bank Ineligible (sanctions) ingest ✅
   - OCDS ingest (Release Package & JSONL/GZ) ✅
   - GDELT DOC fetcher
-  - Seed contract features (award concentration, repeat‑winner, near‑threshold, z‑scores)
+  - Seed contract features (award concentration, repeat‑winner, near‑threshold, z‑scores) ✅
 
 - **Sprint 2 – Graph & Model**
   - NetworkX prototype (buyer–award–supplier)
@@ -220,9 +312,10 @@ pytest -q
   - Replace heuristic with an ML model + basic explanations
 
 - **Sprint 3 – App & Responsible AI**
-  - Batch scoring endpoint + dataset dashboard
+  - Batch scoring endpoint + dataset dashboard ✅
   - Model card, data sheet, provenance logging
   - Responsible AI controls & prompts for LLM extraction
+
 ---
 
 ## Environment variables
@@ -232,6 +325,8 @@ Create `.env` (see `.env.example`):
 ```
 API_URL=http://127.0.0.1:8000
 GEMINI_API_KEY=your_key_here
+FEATURES_PATH=data/feature_store/contracts_features.parquet
+GRAPH_METRICS_PATH=data/graph/metrics.parquet
 ```
 
 ---
