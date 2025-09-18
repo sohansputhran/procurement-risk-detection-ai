@@ -238,6 +238,32 @@ python -m procurement_risk_detection_ai.pipelines.features.contracts_features   
 
 ---
 
+## Graph metrics — buyers ↔ suppliers + distance-to-sanctioned
+
+Build a bipartite graph from OCDS, compute supplier centralities and **distance to sanctioned** (via name matching to the World Bank ineligible list).
+
+**Run**
+```bash
+python -m procurement_risk_detection_ai.graph.graph_utils   --tenders  data/curated/ocds/tenders.parquet   --awards   data/curated/ocds/awards.parquet   --sanctions data/curated/worldbank/ineligible.parquet   --out-dir  data   --ego-supplier-id S1           # optional (saves an ego PNG)
+# For faster runs on big graphs, skip betweenness:
+#   add --no-betweenness
+```
+
+**Outputs**
+- `data/graph/metrics.parquet` (columns: `supplier_id`, `supplier_name`, `degree`, `betweenness`, `distance_to_sanctioned`)
+- `data/graph/ego_<supplier_id>.png` (optional, if `--ego-supplier-id` is used)
+
+**Notes**
+- If you see `AttributeError: module 'networkx' has no attribute 'multi_source_shortest_path_length'`, you’re on an older NetworkX. Upgrade with:
+  ```bash
+  pip install --upgrade "networkx>=3.0"
+  ```
+  This module also includes a **fallback** that combines single-source BFS when that function isn’t available, so it will work across versions—but upgrading is recommended for performance.
+
+- To incorporate `distance_to_sanctioned` into scoring, export metrics at award level or join by `supplier_id` in the batch endpoint. (Planned follow‑up: join by supplier.)
+
+---
+
 ## Project structure
 
 ```
@@ -251,6 +277,7 @@ src/procurement_risk_detection_ai/
   llm/                            # Gemini wrapper (structured output)
   pipelines/ingestion/            # public-data ingesters (WB/OCDS/GDELT)
   pipelines/features/             # feature builders
+  graph/                          # buyer↔supplier graph + metrics
 tests/                            # pytest tests
 ```
 
@@ -265,7 +292,6 @@ ruff check .
 black .
 
 # Tests
-pip install pytest
 pytest -q
 ```
 
@@ -295,6 +321,9 @@ pytest -q
 - **Excel read error**
   Install `openpyxl` and ensure you used `--xlsx-file` with a real `.xlsx` path.
 
+- **NetworkX multi-source error**
+  Upgrade to `networkx>=3.0` or rely on the built-in fallback in `graph_utils.py`.
+
 ---
 
 ## Roadmap (Agile)
@@ -307,8 +336,8 @@ pytest -q
   - Seed contract features (award concentration, repeat‑winner, near‑threshold, z‑scores) ✅
 
 - **Sprint 2 – Graph & Model**
-  - NetworkX prototype (buyer–award–supplier)
-  - Centralities + distance‑to‑sanctioned
+  - NetworkX prototype (buyer–award–supplier) ✅
+  - Centralities + distance‑to‑sanctioned ✅
   - Replace heuristic with an ML model + basic explanations
 
 - **Sprint 3 – App & Responsible AI**
