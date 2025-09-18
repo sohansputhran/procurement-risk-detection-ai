@@ -302,6 +302,41 @@ OCDS_AWARDS_PATH=data/curated/ocds/awards.parquet
 
 ---
 
+
+---
+
+## Provenance logging (per request)
+
+All API requests are logged to `data/logs/provenance/YYYY-MM-DD.jsonl`. Each record contains:
+
+- `request_id` (returned in responses as `provenance_id`)
+- timestamp and duration
+- payload preview (first few items for batch)
+- dataset paths from environment variables (`FEATURES_PATH`, `GRAPH_METRICS_PATH`, `WB_INELIGIBLE_PATH`, `OCDS_TENDERS_PATH`, `OCDS_AWARDS_PATH`)
+- status and error (if any)
+
+**Environment variable (optional):**
+```
+PROVENANCE_LOG_DIR=data/logs/provenance
+```
+
+**Windows PowerShell example calls**
+```powershell
+# Single record
+$body = @{
+  amount = 100000
+  past_awards_count = 2
+  is_sanctioned = $false
+  adverse_media_count = 1
+} | ConvertTo-Json
+
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/v1/score" -ContentType "application/json" -Body $body
+
+# Batch
+$items = @(@{award_id="A1"}, @{award_id="A2"})
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/v1/score/batch" -ContentType "application/json" -Body ($items | ConvertTo-Json)
+```
+
 ## License
 
 MIT © 2025 Sohan Puthran
