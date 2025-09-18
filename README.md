@@ -81,11 +81,19 @@ Content-Type: application/json
 ```
 
 ### Batch scoring (features merge + top-factor attributions)
-Compute scores for many awards at once by merging prebuilt features.
+Compute scores for many awards at once by merging prebuilt features and (optionally) **graph metrics**.
 
-**Build features first** (see *Features* section), then:
+**Prerequisites**
+1) **Build features** (now includes `supplier_id` for graph join):
+```bash
+python -m procurement_risk_detection_ai.pipelines.features.contracts_features   --tenders data/curated/ocds/tenders.parquet   --awards  data/curated/ocds/awards.parquet   --out     data/feature_store/contracts_features.parquet
+```
+2) *(Optional, recommended)* **Build graph metrics** (buyers ↔ suppliers + distance-to-sanctioned):
+```bash
+python -m procurement_risk_detection_ai.graph.graph_utils   --tenders  data/curated/ocds/tenders.parquet   --awards   data/curated/ocds/awards.parquet   --sanctions data/curated/worldbank/ineligible.parquet   --out-dir  data
+```
 
-**PowerShell (recommended):**
+**PowerShell (recommended call):**
 ```powershell
 $body = @(
   @{ award_id = "A1" }
@@ -121,7 +129,13 @@ FEATURES_PATH=data/feature_store/contracts_features.parquet
 GRAPH_METRICS_PATH=data/graph/metrics.parquet  # optional
 ```
 
-Response shape (example):
+**What happens under the hood**
+- The endpoint merges your request with **features by `award_id`**.
+- If `GRAPH_METRICS_PATH` exists and both sides have `supplier_id`, it **left‑joins graph metrics by `supplier_id`**.
+- A weighted score in `[0,1]` is returned along with top contributing factors.
+  When graph metrics are present, `adjacency_to_sanctioned` (derived from `distance_to_sanctioned`) contributes.
+
+Response example:
 ```json
 [
   {
@@ -132,7 +146,7 @@ Response shape (example):
       "amount_zscore_by_category_norm": 0.20,
       "adjacency_to_sanctioned": 0.15
     },
-    "provenance": { "features": "data/feature_store/contracts_features.parquet", "ts": "..." },
+    "provenance": { "features": "data/feature_store/contracts_features.parquet", "graph_metrics": "data/graph/metrics.parquet", "ts": "..." },
     "warnings": null
   }
 ]
@@ -235,6 +249,16 @@ python -m procurement_risk_detection_ai.pipelines.features.contracts_features   
 
 **Outputs**
 - `data/feature_store/contracts_features.parquet`
+  Columns include:
+  - `award_id`
+  - **`supplier_id`** ← used to join graph metrics
+  - `award_concentration_by_buyer`
+  - `repeat_winner_ratio`
+  - `amount_zscore_by_category`
+  - `near_threshold_flag`
+  - `time_to_award_days`
+
+> **Upgrade note:** If your old features file lacks `supplier_id`, rebuild with the current script so the batch API can join graph metrics.
 
 ---
 
@@ -258,9 +282,7 @@ python -m procurement_risk_detection_ai.graph.graph_utils   --tenders  data/cura
   ```bash
   pip install --upgrade "networkx>=3.0"
   ```
-  This module also includes a **fallback** that combines single-source BFS when that function isn’t available, so it will work across versions—but upgrading is recommended for performance.
-
-- To incorporate `distance_to_sanctioned` into scoring, export metrics at award level or join by `supplier_id` in the batch endpoint. (Planned follow‑up: join by supplier.)
+  The module also includes a **fallback** that combines single-source BFS when that function isn’t available—upgrading is recommended for performance.
 
 ---
 
@@ -312,38 +334,20 @@ pytest -q
 - **422 Unprocessable Entity on batch**
   Ensure the POST body is a JSON **array** (see examples above). In PowerShell, prefer `Invoke-RestMethod` or `curl.exe --data-binary @file.json`.
 
+- **503 Features not available…**
+  Ensure you rebuilt features with the current script so `supplier_id` exists in the parquet.
+
+- **Graph metrics not affecting score**
+  Confirm `data/graph/metrics.parquet` exists and has `supplier_id` + `distance_to_sanctioned`; check `GRAPH_METRICS_PATH`.
+
 - **500 / NaN or Infinity in JSON**
-  The API sanitizes numbers, but if you derive your own scores ensure you don’t return NaN/Inf (JSON‑invalid).
+  The API sanitizes numbers, but if you derive your own scores ensure you don’t return NaN/Inf (JSON-invalid).
 
 - **Parquet engine error**
   Install `pyarrow`.
 
 - **Excel read error**
   Install `openpyxl` and ensure you used `--xlsx-file` with a real `.xlsx` path.
-
-- **NetworkX multi-source error**
-  Upgrade to `networkx>=3.0` or rely on the built-in fallback in `graph_utils.py`.
-
----
-
-## Roadmap (Agile)
-
-- **Sprint 1 – Ingestion & Feature Seeds**
-  - World Bank Projects ingest → Parquet ✅
-  - World Bank Ineligible (sanctions) ingest ✅
-  - OCDS ingest (Release Package & JSONL/GZ) ✅
-  - GDELT DOC fetcher
-  - Seed contract features (award concentration, repeat‑winner, near‑threshold, z‑scores) ✅
-
-- **Sprint 2 – Graph & Model**
-  - NetworkX prototype (buyer–award–supplier) ✅
-  - Centralities + distance‑to‑sanctioned ✅
-  - Replace heuristic with an ML model + basic explanations
-
-- **Sprint 3 – App & Responsible AI**
-  - Batch scoring endpoint + dataset dashboard ✅
-  - Model card, data sheet, provenance logging
-  - Responsible AI controls & prompts for LLM extraction
 
 ---
 
