@@ -107,6 +107,7 @@ python -m procurement_risk_detection_ai.graph.graph_utils   --tenders  data/cura
 
 ## Streamlit — Datasets & Batch Scoring page
 
+
 Path: `app/ui/pages/1_Datasets.py`
 
 - Shows **dataset availability** and **row counts** by calling `/health`.
@@ -119,6 +120,18 @@ API_URL=http://127.0.0.1:8000
 
 Run the UI:
 ```bash
+
+
+### Download Batch Scores as CSV
+
+The Streamlit UI supports downloading batch scoring results as a CSV with flattened top-factor columns:
+
+- `top_factor_1_name`, `top_factor_1_value`
+- `top_factor_2_name`, `top_factor_2_value`
+- …
+
+This is available on the **Datasets & Batch Scoring** page after running a batch request. The CSV is encoded with UTF-8 (with BOM) for Excel-friendly opening on Windows.
+
 python -m streamlit run app/ui/streamlit_app.py
 ```
 
