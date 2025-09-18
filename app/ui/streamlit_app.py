@@ -4,10 +4,11 @@ import streamlit as st
 import pandas as pd
 
 # Use the package path for utils (matches utils.py we created)
-from app.ui.utils import (
+from procurement_risk_detection_ai.app.ui.utils import (
     results_json_to_dataframe,
     df_to_csv_bytes,
 )
+
 
 API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
 
