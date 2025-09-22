@@ -53,6 +53,9 @@ st.write(
 )
 
 join_graph = st.toggle("Join graph metrics (if available)", value=False)
+limit_top_factors = st.slider(
+    "Top factors to show per item", min_value=1, max_value=20, value=5
+)
 timeout_sec = st.number_input(
     "Request timeout (seconds)", min_value=5, max_value=300, value=60, step=5
 )
@@ -78,7 +81,10 @@ if up is not None:
 
         # Call API; respect shape mirroring (list-in -> list-out)
         url = f"{API_URL}/v1/score/batch"
-        params = {"join_graph": str(join_graph).lower()}
+        params = {
+            "join_graph": str(join_graph).lower(),
+            "limit_top_factors": int(limit_top_factors),
+        }
         resp = requests.post(url, json=payload, params=params, timeout=timeout_sec)
         if resp.status_code != 200:
             st.error(f"API error {resp.status_code}: {resp.text}")
