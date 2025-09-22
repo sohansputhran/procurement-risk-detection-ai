@@ -3,9 +3,31 @@
 Cloud-native, investigator-friendly analytics to surface integrity risks in public procurement using **public data** and **Google Gemini** for structured extraction.
 
 - **API:** FastAPI (`/health`, `/v1/score`, `/v1/extract/adverse-media`, `/v1/score/batch`)
-- **UI:** Streamlit demo (now includes a **Datasets & Batch Scoring** page)
+- **UI:** Streamlit demo (includes **Datasets & Batch Scoring** page with CSV upload/download)
+- **ML Baseline:** Logistic Regression with SHAP-style linear contributions
 - **LLM:** Google GenAI SDK (Gemini) with strict, schema-validated JSON output
 - **Layout:** `src/` package (editable install)
+- **OS:** Windows-friendly commands throughout
+
+---
+
+## What's new (Sep 2025)
+
+- **Batch endpoint shape fixed:** `POST /v1/score/batch` now mirrors the input shape.
+  - **List in → List out** (no wrapper keys) — satisfies `tests/test_api_batch.py::test_batch_scores_with_graph` (`len(response) == len(input)`).
+  - **Envelope in → Envelope out** (returns `{ "items": [...], "provenance_id": "...",
+    "used_model": true }`).
+  - Enforces **1:1 outputs per input row** even if joins fan out (uses `_input_row_id` + `groupby(...).first()`).
+  - Optional `?join_graph=true` to attach graph metrics when available.
+- **Baseline model fix:** `fit_baseline(...)` now **returns** the fitted `LogisticRegression`, fixing
+  `tests/test_model_explanations.py` (`isinstance(model, LogisticRegression)`).
+- **Training CLI hardened:** `models/train_baseline.py`
+  - `--features-cols auto` to select present columns from `FEATURE_COLS_DEFAULT`.
+  - Robust Parquet IO (pyarrow/fastparquet) with CSV fallback + clearer errors.
+  - Prints proxy-label balance, sample features, and **top weights** after training.
+  - Windows-friendly and exits with helpful codes on failure.
+- **Streamlit UX:** Batch page supports CSV upload with `award_id` and **downloads** results as CSV.
+- **Provenance:** Batch scoring logs provenance (endpoint, counts, durations) and returns `provenance_id` in the envelope form.
 
 ---
 
@@ -13,7 +35,7 @@ Cloud-native, investigator-friendly analytics to surface integrity risks in publ
 
 ```bash
 # 1) Create & activate a virtual env
-python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
+python -m venv .venv && .venv\Scripts\activate     # Windows
 
 # 2) Install runtime deps
 pip install -r requirements.txt
@@ -22,9 +44,10 @@ pip install -r requirements.txt
 pip install -e .
 
 # 4) Environment
-cp .env.example .env
-# Set your Gemini key (get it from Google AI Studio)
-# export GEMINI_API_KEY=YOUR_KEY
+copy .env.example .env   # Windows
+
+# Set your Gemini key:
+#   GEMINI_API_KEY=YOUR_KEY
 
 # 5) Run API & UI
 python -m uvicorn procurement_risk_detection_ai.app.api.main:app --reload --port 8000
@@ -34,30 +57,17 @@ python -m streamlit run app/ui/streamlit_app.py
 ### Windows notes
 PowerShell aliases `curl` to `Invoke-WebRequest`. For JSON POSTs, either:
 - Use **PowerShell-native** (`Invoke-RestMethod`) or
-- Call **`curl.exe`** explicitly (see examples below).
+- Call **`curl.exe`** explicitly.
 
 ---
 
 ## Endpoints
 
-### Health (datasets probe)
+### Health
 ```
 GET /health
 ```
-Returns API version and row counts/availability for configured datasets:
-```json
-{
-  "status": "ok",
-  "api_version": "…",
-  "datasets": {
-    "features":        {"path": ".../contracts_features.parquet", "rows": 12345, "available": true},
-    "graph_metrics":   {"path": ".../metrics.parquet",            "rows": 6789,  "available": true},
-    "wb_ineligible":   {"path": ".../ineligible.parquet",         "rows": 321,   "available": true},
-    "ocds_tenders":    {"path": ".../tenders.parquet",            "rows": 1000,  "available": true},
-    "ocds_awards":     {"path": ".../awards.parquet",             "rows": 1000,  "available": true}
-  }
-}
-```
+Returns API version and row counts/availability for configured datasets.
 
 Environment overrides (optional):
 ```
@@ -68,7 +78,7 @@ OCDS_TENDERS_PATH=data/curated/ocds/tenders.parquet
 OCDS_AWARDS_PATH=data/curated/ocds/awards.parquet
 ```
 
-### Risk score (demo heuristic)
+### Risk score (simple demo)
 ```
 POST /v1/score
 Content-Type: application/json
@@ -88,17 +98,39 @@ Content-Type: application/json
 { "text": "…paste a news paragraph or snippet…" }
 ```
 
-### Batch scoring (features merge + ML explanations)
-Compute scores for many awards at once by merging prebuilt features and (optionally) **graph metrics**.
+### Batch scoring (features merge + optional graph + ML explanations)
 
 **Prerequisites**
-1) **Build features** (includes `supplier_id` for graph join):
+1) **Build features** (must include `supplier_id` for graph join):
 ```bash
-python -m procurement_risk_detection_ai.pipelines.features.contracts_features   --tenders data/curated/ocds/tenders.parquet   --awards  data/curated/ocds/awards.parquet   --out     data/feature_store/contracts_features.parquet
+python -m procurement_risk_detection_ai.pipelines.features.contracts_features ^
+  --tenders data/curated/ocds/tenders.parquet ^
+  --awards  data/curated/ocds/awards.parquet ^
+  --out     data/feature_store/contracts_features.parquet
 ```
 2) *(Optional)* **Build graph metrics**:
 ```bash
-python -m procurement_risk_detection_ai.graph.graph_utils   --tenders  data/curated/ocds/tenders.parquet   --awards   data/curated/ocds/awards.parquet   --sanctions data/curated/worldbank/ineligible.parquet   --out-dir  data
+python -m procurement_risk_detection_ai.graph.graph_utils ^
+  --tenders  data/curated/ocds/tenders.parquet ^
+  --awards   data/curated/ocds/awards.parquet ^
+  --sanctions data/curated/worldbank/ineligible.parquet ^
+  --out-dir  data
+```
+
+**List-in → List-out example**
+```bash
+curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch" ^
+  -H "Content-Type: application/json" ^
+  -d "[{\"award_id\":\"A1\"},{\"award_id\":\"A2\"}]"
+# → returns a JSON array with 2 items
+```
+
+**Envelope-in → Envelope-out example**
+```bash
+curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch?join_graph=true" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"items\":[{\"award_id\":\"A1\"},{\"award_id\":\"A2\"}]}"
+# → returns: { "items": [...], "provenance_id": "...", "used_model": true }
 ```
 
 **Swagger UI:** open `http://127.0.0.1:8000/docs` → `POST /v1/score/batch`.
@@ -110,7 +142,8 @@ python -m procurement_risk_detection_ai.graph.graph_utils   --tenders  data/cura
 Path: `app/ui/pages/1_Datasets.py`
 
 - Shows **dataset availability** and **row counts** by calling `/health`.
-- Lets you **upload a CSV** with an `award_id` column to call `/v1/score/batch` and view results (plus a quick bar chart of top risks).
+- Lets you **upload a CSV** with an `award_id` column to call `/v1/score/batch` and view results
+  (plus a bar chart of highest risk). Supports **download** of scored results as CSV.
 
 Set the API base URL for the UI:
 ```
@@ -124,73 +157,42 @@ python -m streamlit run app/ui/streamlit_app.py
 
 ---
 
-
----
-
 ## Baseline ML model (Logistic Regression) + SHAP-style explanations
 
-You can now replace the demo heuristic with a simple ML baseline trained on your curated
-`contracts_features.parquet`. Until labeled outcomes are available, the training script derives
-a **proxy label** from feature heuristics (`near_threshold_flag`, high `amount_zscore_by_category`,
-high `repeat_winner_ratio`, and `award_concentration_by_buyer`).
+Train on curated `contracts_features.parquet`. Until labeled outcomes are available,
+the training script derives a **proxy label** from feature heuristics
+(`near_threshold_flag`, high `amount_zscore_by_category`, high `repeat_winner_ratio`,
+`award_concentration_by_buyer`).
 
 **Train the baseline**
 ```bash
-# Train baseline (saves to models/)
-python -m procurement_risk_detection_ai.models.train_baseline --features data/feature_store/contracts_features.parquet
+
+# Train baseline (saves artifacts to models/)
+python -m procurement_risk_detection_ai.models.train_baseline --features data/feature_store/contracts_features.parquet --features-cols auto
 ```
 
 **How batch scoring uses the model**
 - If `models/baseline_logreg.joblib` exists, `POST /v1/score/batch` will use it to compute:
   - `risk_score` in [0,1]
-  - `top_factors` — linear logit contributions per feature (sorted by absolute magnitude; SHAP-style)
-- If no model is found, the endpoint **falls back** to the previous heuristic rules.
+  - `top_factors` — linear logit contributions per feature (sorted by |contribution|; SHAP-style)
+- If no model is found, the endpoint **falls back** to intrinsic heuristic rules.
 
-**Response shape (excerpt)**
-```json
-{
-  "items": [
-    {
-      "award_id": "A1",
-      "supplier_id": "S1",
-      "risk_score": 0.78,
-      "top_factors": [
-        {"name": "repeat_winner_ratio", "value": 0.92, "contribution": 1.15},
-        {"name": "amount_zscore_by_category", "value": 2.7, "contribution": 0.84}
-      ]
-    }
-  ],
-  "provenance_id": "abc123...",
-  "used_model": true
-}
+**Response (list-in excerpt)**
+```jsonc
+[
+  {
+    "award_id": "A1",
+    "supplier_id": "S1",
+    "risk_score": 0.78,
+    "top_factors": [
+      {"name": "repeat_winner_ratio", "value": 0.92, "contribution": 1.15},
+      {"name": "amount_zscore_by_category", "value": 2.7, "contribution": 0.84}
+    ]
+  }
+]
 ```
 
-> Tip: set `FEATURES_PATH` (and optionally `GRAPH_METRICS_PATH`) so the batch endpoint can merge features (and graph metrics via `?join_graph=true`).
-
-
-## LLMs: Google Gemini (public-only)
-
-- SDK: `google-genai`
-- Key: `GEMINI_API_KEY` (environment variable)
-
-Minimal example (already wired in the API):
-```python
-from google import genai
-from procurement_risk_detection_ai.llm.gemini_client import AdverseMediaPayload
-
-client = genai.Client()  # reads GEMINI_API_KEY
-resp = client.models.generate_content(
-    model="gemini-2.5-flash",
-    contents="Extract adverse media for ACME bribery at http://example.com",
-    config={
-        "response_mime_type": "application/json",
-        "response_schema": AdverseMediaPayload,
-    },
-)
-print(resp.parsed or resp.text)
-```
-
-> Tip: if `GEMINI_API_KEY` is unset, LLM tests are auto-skipped.
+> Tip: set `FEATURES_PATH` (and optionally `GRAPH_METRICS_PATH`) so batch can merge features (and graph metrics via `?join_graph=true`).
 
 ---
 
@@ -204,24 +206,33 @@ print(resp.parsed or resp.text)
 
 ### World Bank — Projects → JSONL + Parquet
 ```bash
-python -m procurement_risk_detection_ai.pipelines.ingestion.wb_projects   --rows 500 --max-pages 40 --out-dir data
+python -m procurement_risk_detection_ai.pipelines.ingestion.wb_projects ^
+  --rows 500 --max-pages 40 --out-dir data
 ```
 
 ### World Bank — Ineligible (Sanctions) → JSONL + Parquet
 Use the official **Excel** (download locally) for reliable parsing.
 ```bash
-python -m procurement_risk_detection_ai.pipelines.ingestion.wb_ineligible   --xlsx-file "C:\Users\you\Downloads\Listing of Ineligible Firms and Individuals.xlsx"   --out-dir data
+python -m procurement_risk_detection_ai.pipelines.ingestion.wb_ineligible ^
+  --xlsx-file "C:\Users\you\Downloads\Listing of Ineligible Firms and Individuals.xlsx" ^
+  --out-dir data
 ```
 
 ### OCDS — Release Packages / JSONL feeds → Parquet
 From URL (JSONL.GZ — use `--take` to sample):
 ```bash
-python -m procurement_risk_detection_ai.pipelines.ingestion.ocds_loader   --url "https://data.open-contracting.org/en/publication/155/download?name=full.jsonl.gz"   --print-only --take 200
-python -m procurement_risk_detection_ai.pipelines.ingestion.ocds_loader   --url "https://data.open-contracting.org/en/publication/155/download?name=full.jsonl.gz"   --out-dir data
+python -m procurement_risk_detection_ai.pipelines.ingestion.ocds_loader ^
+  --url "https://data.open-contracting.org/en/publication/155/download?name=full.jsonl.gz" ^
+  --print-only --take 200
+python -m procurement_risk_detection_ai.pipelines.ingestion.ocds_loader ^
+  --url "https://data.open-contracting.org/en/publication/155/download?name=full.jsonl.gz" ^
+  --out-dir data
 ```
 From local file:
 ```bash
-python -m procurement_risk_detection_ai.pipelines.ingestion.ocds_loader   --path data/raw/ocds/releases.jsonl.gz   --out-dir data
+python -m procurement_risk_detection_ai.pipelines.ingestion.ocds_loader ^
+  --path data/raw/ocds/releases.jsonl.gz ^
+  --out-dir data
 ```
 
 **Curated outputs**
@@ -234,7 +245,10 @@ python -m procurement_risk_detection_ai.pipelines.ingestion.ocds_loader   --path
 ## Features — Contract-level feature seeds
 
 ```bash
-python -m procurement_risk_detection_ai.pipelines.features.contracts_features   --tenders data/curated/ocds/tenders.parquet   --awards  data/curated/ocds/awards.parquet   --out     data/feature_store/contracts_features.parquet
+python -m procurement_risk_detection_ai.pipelines.features.contracts_features ^
+  --tenders data/curated/ocds/tenders.parquet ^
+  --awards  data/curated/ocds/awards.parquet ^
+  --out     data/feature_store/contracts_features.parquet
 ```
 Outputs:
 - `data/feature_store/contracts_features.parquet`
@@ -246,10 +260,16 @@ Outputs:
 ## Graph metrics — buyers ↔ suppliers + distance-to-sanctioned
 
 ```bash
-python -m procurement_risk_detection_ai.graph.graph_utils   --tenders  data/curated/ocds/tenders.parquet   --awards   data/curated/ocds/awards.parquet   --sanctions data/curated/worldbank/ineligible.parquet   --out-dir  data   --ego-supplier-id S1           # optional (saves an ego PNG)
-# For faster runs on big graphs, skip betweenness with --no-betweenness
-```
+python -m procurement_risk_detection_ai.graph.graph_utils ^
+  --tenders  data/curated/ocds/tenders.parquet ^
+  --awards   data/curated/ocds/awards.parquet ^
+  --sanctions data/curated/worldbank/ineligible.parquet ^
+  --out-dir  data ^
+  --ego-supplier-id S1           # optional (saves an ego PNG)
 
+# For faster runs on big graphs, skip betweenness with:
+#   --no-betweenness
+```
 Outputs:
 - `data/graph/metrics.parquet` (`supplier_id`, `supplier_name`, `degree`, `betweenness`, `distance_to_sanctioned`)
 - `data/graph/ego_<supplier_id>.png` (optional)
@@ -257,6 +277,17 @@ Outputs:
 If you see a NetworkX “multi_source_shortest_path_length” error, upgrade:
 ```
 pip install --upgrade "networkx>=3.0"
+```
+
+---
+
+## Tests
+
+```bash
+pytest -q
+# Key checks:
+# - tests/test_api_batch.py::test_batch_scores_with_graph  ✅ list-in → list-out, len matches
+# - tests/test_model_explanations.py::test_predict_proba_and_contrib_linear_explanations ✅ model + contributions
 ```
 
 ---
@@ -272,6 +303,7 @@ docs/                             # architecture, notes
 llm/schemas/                      # JSON/Pydantic schemas
 src/procurement_risk_detection_ai/
   app/api/                        # FastAPI app (health, batch, etc.)
+  app/services/                   # scoring, provenance
   llm/                            # Gemini wrapper (structured output)
   pipelines/ingestion/            # public-data ingesters (WB/OCDS/GDELT)
   pipelines/features/             # feature builders
@@ -289,31 +321,9 @@ pip install ruff black
 ruff check .
 black .
 
-# Tests
-pytest -q
+# Editable install for tests & CLI
+pip install -e .
 ```
-
-## Troubleshooting
-
-- **`ModuleNotFoundError: procurement_risk_detection_ai`**
-  Run `pip install -e .`; ensure tests import via the package path (not `src.`).
-  Add a `pytest.ini` if needed:
-  ```ini
-  [pytest]
-  pythonpath =
-      src
-  ```
-
-- **JSON/JSONL decode errors on OCDS URL**
-  Feeds like `*.jsonl.gz` are line‑delimited. Use `--take` for sampling.
-
-- **422/503 or JSON errors on batch**
-  - Ensure the POST body is a JSON **array** (`[{ "award_id": "A1" }, …]`).
-  - Rebuild features so `supplier_id` exists for graph joins.
-  - Install `pyarrow` (Parquet) and `openpyxl` (Excel) as needed.
-
-- **UI cannot reach API**
-  Set `API_URL` (env or `.env`) to your running FastAPI base URL.
 
 ---
 
