@@ -179,6 +179,12 @@ def _to_feature_vector(
             raise ValueError("ndarray length does not match feature_cols length")
         return vec
 
+    if isinstance(features, pd.DataFrame):
+        # if a single-row DataFrame sneaks in, use the first row
+        if len(features) == 0:
+            raise TypeError("features DataFrame is empty")
+        features = features.iloc[0]
+
     if isinstance(features, pd.Series):
         return np.array(
             [float(features.get(c, 0.0)) for c in feature_cols], dtype=float
@@ -192,39 +198,60 @@ def _to_feature_vector(
     raise TypeError("Unsupported features type; expected Series, dict, or ndarray")
 
 
-def predict_proba_and_contrib(
-    model: LogisticRegression,
-    features: Union[pd.Series, Dict[str, Any], np.ndarray],
-    feature_cols: List[str],
-) -> Tuple[float, List[Dict[str, Any]]]:
-    """
-    Compute p(y=1) and linear contributions (coef_i * x_i) per feature.
-    Returns:
-        prob: float in [0,1]
-        contributions: List[{name, value, contribution}] sorted by |contribution| desc
-    """
-    x = _to_feature_vector(features, feature_cols)
+def _predict_proba_internal(model: LogisticRegression, x: np.ndarray) -> float:
     coef = np.asarray(model.coef_[0], dtype=float)
     intercept = float(getattr(model, "intercept_", [0.0])[0])
-
-    # Guard against length mismatch (shouldn't happen if trained with same columns)
-    if coef.shape[0] != x.shape[0]:
-        # pad/truncate safely
-        n = min(coef.shape[0], x.shape[0])
-        coef = coef[:n]
-        x = x[:n]
-        feature_cols = feature_cols[:n]
-
+    # align lengths if needed
+    n = min(coef.shape[0], x.shape[0])
+    coef = coef[:n]
+    x = x[:n]
     logit = float(intercept + float(np.dot(coef, x)))
     prob = float(1.0 / (1.0 + np.exp(-logit)))
+    return prob
 
-    contribs: List[Dict[str, Any]] = []
+
+def predict_proba_and_contrib(
+    model: LogisticRegression,
+    a: Union[List[str], pd.Series, Dict[str, Any], np.ndarray],
+    b: Optional[Union[List[str], pd.Series, Dict[str, Any], np.ndarray]] = None,
+) -> Tuple[float, List[Tuple[str, float]]]:
+    """
+    Flexible signature to support both:
+      - predict_proba_and_contrib(model, FEATURE_COLS_DEFAULT, row)
+      - predict_proba_and_contrib(model, row, FEATURE_COLS_DEFAULT)
+
+    Returns:
+        prob: float in [0,1]
+        contributions: List[(name, contribution)] sorted by |contribution| desc
+    """
+    # Disambiguate args by type
+    if isinstance(a, list) and all(isinstance(x, str) for x in a):
+        feature_cols = a
+        features = b  # type: ignore
+    else:
+        features = a  # type: ignore
+        feature_cols = b  # type: ignore
+
+    if not isinstance(feature_cols, list) or not all(
+        isinstance(x, str) for x in feature_cols
+    ):
+        raise TypeError("feature_cols must be a List[str]")
+
+    x = _to_feature_vector(features, feature_cols)
+    # Guard against coef length mismatch
+    coef = np.asarray(model.coef_[0], dtype=float)
+    n = min(len(coef), len(x))
+    coef = coef[:n]
+    x = x[:n]
+    feature_cols = feature_cols[:n]
+
+    prob = _predict_proba_internal(model, x)
+
+    contribs: List[Tuple[str, float]] = []
     for name, value, w in zip(feature_cols, x, coef):
-        c = float(w * value)
-        v = float(value) if np.isfinite(value) else None
-        contribs.append({"name": name, "value": v, "contribution": c})
+        contribs.append((name, float(w * value)))
 
-    contribs.sort(key=lambda d: abs(d.get("contribution") or 0.0), reverse=True)
+    contribs.sort(key=lambda t: abs(t[1]), reverse=True)
     return prob, contribs
 
 
@@ -236,9 +263,23 @@ def predict_proba_and_contrib_linear_explanations(
 ) -> Dict[str, Any]:
     """
     Convenience wrapper that returns the API-style payload:
-    { "risk_score": p, "top_factors": [ ... ] }
+    { "risk_score": p, "top_factors": [ {name, value, contribution}, ... ] }
     """
-    p, contribs = predict_proba_and_contrib(model, features, feature_cols)
+    x = _to_feature_vector(features, feature_cols)
+    prob = _predict_proba_internal(model, x)
+    coef = np.asarray(model.coef_[0], dtype=float)
+    n = min(len(coef), len(x))
+    coef = coef[:n]
+    x = x[:n]
+    feature_cols = feature_cols[:n]
+
+    contribs: List[Dict[str, Any]] = []
+    for name, value, w in zip(feature_cols, x, coef):
+        contribs.append(
+            {"name": name, "value": float(value), "contribution": float(w * value)}
+        )
+
+    contribs.sort(key=lambda d: abs(d["contribution"]), reverse=True)
     if top_k is not None:
         contribs = contribs[: int(top_k)]
-    return {"risk_score": p, "top_factors": contribs}
+    return {"risk_score": prob, "top_factors": contribs}
