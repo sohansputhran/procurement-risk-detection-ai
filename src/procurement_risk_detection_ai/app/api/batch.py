@@ -53,9 +53,17 @@ def _load_parquet(path: str) -> pd.DataFrame:
 
 # Cache for the HOT features parquet to avoid re-reading on each request
 _FEATURES_CACHE: Dict[str, Any] = {"path": None, "mtime": None, "df": None}
+_FEATURES_CACHE_DISABLED = os.getenv("FEATURES_CACHE_DISABLE", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 
 def _load_parquet_cached(path: str) -> pd.DataFrame:
+    if _FEATURES_CACHE_DISABLED:
+        # Bypass cache entirely
+        return _load_parquet(path)
     p = Path(path)
     if not p.exists():
         return pd.DataFrame()
