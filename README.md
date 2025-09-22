@@ -128,6 +128,23 @@ curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch?join_graph=true" ^
 
 **Swagger UI:** open `http://127.0.0.1:8000/docs` → `POST /v1/score/batch`.
 
+### Query parameters
+- `join_graph` (bool, default **false**): If `true`, left-joins supplier-level graph metrics when `GRAPH_METRICS_PATH` exists.
+- `limit_top_factors` (int, **1–20**, default **5**): Caps the number of explanation factors returned per item. Only affects the length of `top_factors`; **risk_score is unchanged**.
+
+**Example**
+```bash
+# Envelope-in → Envelope-out, join graph + show top 3 factors per item
+curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch?join_graph=true&limit_top_factors=3" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"items\":[{\"award_id\":\"A1\"},{\"award_id\":\"A2\"}]}"
+```
+
+### Performance
+- **Features parquet caching**: The API caches the DataFrame loaded from `FEATURES_PATH` by `(path, mtime)` to avoid re-reading on every request.
+  - Changes are picked up automatically when the file is replaced or its modification time updates.
+  - Graph metrics parquet is smaller/infrequent and is read without caching.
+
 ---
 
 ## Streamlit — Datasets & Batch Scoring page
