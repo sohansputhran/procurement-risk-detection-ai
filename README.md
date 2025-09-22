@@ -15,7 +15,7 @@ Cloud-native, investigator-friendly analytics to surface integrity risks in publ
 
 ```bash
 # 1) Create & activate a virtual env
-python -m venv .venv && .venv\Scripts\activate     # Windows
+python -m venv .venv && .venv\Scripts\activate
 
 # 2) Install runtime deps
 pip install -r requirements.txt
@@ -24,7 +24,7 @@ pip install -r requirements.txt
 pip install -e .
 
 # 4) Environment
-copy .env.example .env   # Windows
+copy .env.example .env
 # Set your Gemini key:
 #   GEMINI_API_KEY=YOUR_KEY
 
@@ -197,12 +197,6 @@ python -m procurement_risk_detection_ai.models.evaluate_baseline --features data
 
 ## Public data ingestion
 
-> Ensure Parquet/Excel engines as needed:
->
-> ```bash
-> pip install pyarrow openpyxl
-> ```
-
 ### World Bank — Projects → JSONL + Parquet
 ```bash
 python -m procurement_risk_detection_ai.pipelines.ingestion.wb_projects ^
@@ -321,6 +315,11 @@ tests/                            # pytest tests
 pip install ruff black
 ruff check .
 black .
+
+# Optional: pre-commit to auto-fix on commit
+pip install pre-commit
+pre-commit install
+pre-commit run --all-files
 
 # Editable install for tests & CLI
 pip install -e .

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from typing import Any, Dict, List, Optional, Union
+from pathlib import Path
 
 import pandas as pd
 from fastapi import APIRouter, Query, Body
@@ -13,7 +14,6 @@ from procurement_risk_detection_ai.app.services.scoring import (
 )
 from procurement_risk_detection_ai.app.api.provenance import log_provenance
 
-from pathlib import Path
 
 _FEATURES_CACHE = {"path": None, "mtime": None, "df": None}
 
@@ -47,19 +47,24 @@ class BatchResponse(BaseModel):
 
 # ----------------- HELPERS -----------------
 
+_FEATURES_CACHE = {"path": None, "mtime": None, "df": None}
+
 
 def _load_parquet(path: str) -> pd.DataFrame:
+    """Non-cached fallback (kept for graph file)."""
     if not os.path.exists(path):
         return pd.DataFrame()
     return pd.read_parquet(path)
 
 
 def _load_parquet_cached(path: str) -> pd.DataFrame:
+    """Cache features parquet by (path, mtime) to avoid repeated disk reads."""
     p = Path(path)
     if not p.exists():
         return pd.DataFrame()
     mtime = p.stat().st_mtime
     if _FEATURES_CACHE["path"] == str(p) and _FEATURES_CACHE["mtime"] == mtime:
+        # Return a copy to avoid accidental mutation
         return _FEATURES_CACHE["df"].copy()
     df = pd.read_parquet(str(p))
     _FEATURES_CACHE.update({"path": str(p), "mtime": mtime, "df": df})
@@ -72,8 +77,9 @@ def _join_features(df_in: pd.DataFrame, join_graph: bool) -> pd.DataFrame:
     )
     graph_path = os.getenv("GRAPH_METRICS_PATH", "data/graph/metrics.parquet")
 
-    # df_feat = _load_parquet(features_path)
+    # Use cached load for features (hot path)
     df_feat = _load_parquet_cached(features_path)
+
     if df_feat.empty:
         return pd.DataFrame()
     if "award_id" not in df_feat.columns:
@@ -91,6 +97,7 @@ def _join_features(df_in: pd.DataFrame, join_graph: bool) -> pd.DataFrame:
 
     # optional graph join; ensure one row per supplier_id
     if join_graph and os.path.exists(graph_path):
+        # Graph file is smaller/infrequent; normal load is fine
         df_graph = _load_parquet(graph_path)
         if not df_graph.empty and "supplier_id" in df_graph.columns:
             df_graph = df_graph.groupby("supplier_id", as_index=False).first()

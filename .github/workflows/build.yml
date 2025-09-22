@@ -1,13 +1,15 @@
-name: CI
+name: build
 
 on:
   push:
-    branches: [ main, develop, feat/**, fix/**, perf/**, chore/** ]
+    branches: ["**"]
   pull_request:
 
 jobs:
-  test:
+  build:
+    name: build
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,8 +24,7 @@ jobs:
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          restore-keys: ${{ runner.os }}-pip-
 
       - name: Install dependencies
         run: |
@@ -37,10 +38,10 @@ jobs:
           ruff check .
           black --check .
 
-      - name: Run tests
+      - name: Tests
         run: pytest -q
 
-      - name: Evaluate baseline (if features exist)
+      - name: Evaluate baseline (optional)
         run: |
           if [ -f "data/feature_store/contracts_features.parquet" ]; then
             python -m procurement_risk_detection_ai.models.evaluate_baseline \
