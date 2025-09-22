@@ -197,12 +197,6 @@ python -m procurement_risk_detection_ai.models.evaluate_baseline --features data
 
 ## Public data ingestion
 
-> Ensure Parquet/Excel engines as needed:
->
-> ```bash
-> pip install pyarrow openpyxl
-> ```
-
 ### World Bank — Projects → JSONL + Parquet
 ```bash
 python -m procurement_risk_detection_ai.pipelines.ingestion.wb_projects ^
