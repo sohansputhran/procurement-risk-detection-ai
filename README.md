@@ -11,26 +11,6 @@ Cloud-native, investigator-friendly analytics to surface integrity risks in publ
 
 ---
 
-## What's new (Sep 2025)
-
-- **Batch endpoint shape fixed:** `POST /v1/score/batch` now mirrors the input shape.
-  - **List in → List out** (no wrapper keys) — satisfies `tests/test_api_batch.py::test_batch_scores_with_graph` (`len(response) == len(input)`).
-  - **Envelope in → Envelope out** (returns `{ "items": [...], "provenance_id": "...",
-    "used_model": true }`).
-  - Enforces **1:1 outputs per input row** even if joins fan out (uses `_input_row_id` + `groupby(...).first()`).
-  - Optional `?join_graph=true` to attach graph metrics when available.
-- **Baseline model fix:** `fit_baseline(...)` now **returns** the fitted `LogisticRegression`, fixing
-  `tests/test_model_explanations.py` (`isinstance(model, LogisticRegression)`).
-- **Training CLI hardened:** `models/train_baseline.py`
-  - `--features-cols auto` to select present columns from `FEATURE_COLS_DEFAULT`.
-  - Robust Parquet IO (pyarrow/fastparquet) with CSV fallback + clearer errors.
-  - Prints proxy-label balance, sample features, and **top weights** after training.
-  - Windows-friendly and exits with helpful codes on failure.
-- **Streamlit UX:** Batch page supports CSV upload with `award_id` and **downloads** results as CSV.
-- **Provenance:** Batch scoring logs provenance (endpoint, counts, durations) and returns `provenance_id` in the envelope form.
-
----
-
 ## Quickstart
 
 ```bash
@@ -45,11 +25,16 @@ pip install -e .
 
 # 4) Environment
 copy .env.example .env   # Windows
-
 # Set your Gemini key:
 #   GEMINI_API_KEY=YOUR_KEY
 
-# 5) Run API & UI
+# 5) Train the baseline (saves to models/)
+python -m procurement_risk_detection_ai.models.train_baseline --features data/feature_store/contracts_features.parquet --features-cols auto
+
+# 6) Evaluate and emit metrics JSON (reports/metrics/)
+python -m procurement_risk_detection_ai.models.evaluate_baseline --features data/feature_store/contracts_features.parquet --features-cols auto
+
+# 7) Run API & UI
 python -m uvicorn procurement_risk_detection_ai.app.api.main:app --reload --port 8000
 python -m streamlit run app/ui/streamlit_app.py
 ```
@@ -117,6 +102,14 @@ python -m procurement_risk_detection_ai.graph.graph_utils ^
   --out-dir  data
 ```
 
+**Shape mirroring**
+- **List body**: `[{"award_id":"A1"}, {"award_id":"A2"}]` → **returns a plain list** (list-in → list-out).
+- **Envelope body**: `{"items":[... ]}` → **returns an object** `{ "items":[...], "provenance_id":"...", "used_model": true }` (envelope-in → envelope-out).
+
+The endpoint preserves **1:1 outputs per input row** even if joins fan out (uses `_input_row_id` + `groupby(...).first()`), and input order is preserved.
+
+Add `?join_graph=true` to left-join supplier-level graph metrics when `GRAPH_METRICS_PATH` exists.
+
 **List-in → List-out example**
 ```bash
 curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch" ^
@@ -171,10 +164,16 @@ the training script derives a **proxy label** from feature heuristics
 python -m procurement_risk_detection_ai.models.train_baseline --features data/feature_store/contracts_features.parquet --features-cols auto
 ```
 
+**Evaluate the baseline (metrics JSON)**
+```bash
+python -m procurement_risk_detection_ai.models.evaluate_baseline --features data/feature_store/contracts_features.parquet --features-cols auto
+# → writes reports/metrics/baseline_metrics_<timestamp>.json and prints a summary
+```
+
 **How batch scoring uses the model**
 - If `models/baseline_logreg.joblib` exists, `POST /v1/score/batch` will use it to compute:
   - `risk_score` in [0,1]
-  - `top_factors` — linear logit contributions per feature (sorted by |contribution|; SHAP-style)
+  - `top_factors` — linear logit contributions per feature (`coef * value`, sorted by |contribution|; SHAP-style)
 - If no model is found, the endpoint **falls back** to intrinsic heuristic rules.
 
 **Response (list-in excerpt)**
@@ -288,6 +287,7 @@ pytest -q
 # Key checks:
 # - tests/test_api_batch.py::test_batch_scores_with_graph  ✅ list-in → list-out, len matches
 # - tests/test_model_explanations.py::test_predict_proba_and_contrib_linear_explanations ✅ model + contributions
+# - tests/test_evaluate_baseline.py ✅ metrics keys and ranges
 ```
 
 ---
@@ -305,6 +305,7 @@ src/procurement_risk_detection_ai/
   app/api/                        # FastAPI app (health, batch, etc.)
   app/services/                   # scoring, provenance
   llm/                            # Gemini wrapper (structured output)
+  models/                         # baseline & evaluation CLIs
   pipelines/ingestion/            # public-data ingesters (WB/OCDS/GDELT)
   pipelines/features/             # feature builders
   graph/                          # buyer↔supplier graph + metrics

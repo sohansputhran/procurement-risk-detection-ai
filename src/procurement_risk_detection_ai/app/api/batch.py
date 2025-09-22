@@ -13,6 +13,10 @@ from procurement_risk_detection_ai.app.services.scoring import (
 )
 from procurement_risk_detection_ai.app.api.provenance import log_provenance
 
+from pathlib import Path
+
+_FEATURES_CACHE = {"path": None, "mtime": None, "df": None}
+
 router = APIRouter()
 
 
@@ -50,13 +54,26 @@ def _load_parquet(path: str) -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
+def _load_parquet_cached(path: str) -> pd.DataFrame:
+    p = Path(path)
+    if not p.exists():
+        return pd.DataFrame()
+    mtime = p.stat().st_mtime
+    if _FEATURES_CACHE["path"] == str(p) and _FEATURES_CACHE["mtime"] == mtime:
+        return _FEATURES_CACHE["df"].copy()
+    df = pd.read_parquet(str(p))
+    _FEATURES_CACHE.update({"path": str(p), "mtime": mtime, "df": df})
+    return df.copy()
+
+
 def _join_features(df_in: pd.DataFrame, join_graph: bool) -> pd.DataFrame:
     features_path = os.getenv(
         "FEATURES_PATH", "data/feature_store/contracts_features.parquet"
     )
     graph_path = os.getenv("GRAPH_METRICS_PATH", "data/graph/metrics.parquet")
 
-    df_feat = _load_parquet(features_path)
+    # df_feat = _load_parquet(features_path)
+    df_feat = _load_parquet_cached(features_path)
     if df_feat.empty:
         return pd.DataFrame()
     if "award_id" not in df_feat.columns:

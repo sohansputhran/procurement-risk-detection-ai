@@ -136,7 +136,7 @@ def main() -> int:
         top = ", ".join(f"{n}={w:+.4f}" for n, w in pairs[:5])
         print(f"[train] top weights: {top}")
 
-    print("[train] saved model to models/baseline_logreg.joblib and meta json")
+    print("[train] saved model to models_data/baseline_logreg.joblib and meta json")
     return 0
 
 

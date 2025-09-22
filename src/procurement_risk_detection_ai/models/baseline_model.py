@@ -10,7 +10,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 
 
-MODEL_DIR = Path("models")
+MODEL_DIR = Path("models_data")
 MODEL_PATH = MODEL_DIR / "baseline_logreg.joblib"
 META_PATH = MODEL_DIR / "baseline_logreg.meta.json"
 
