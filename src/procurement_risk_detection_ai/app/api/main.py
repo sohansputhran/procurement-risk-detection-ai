@@ -6,12 +6,14 @@ import time
 from procurement_risk_detection_ai.app.api.provenance import log_provenance
 from .batch import router as batch_router
 from .health import router as health_router
+from .model_info import router as model_info_router
 
 app = FastAPI(title="Procurement Risk Detection AI API", version="0.1.0")
 
 # Include other endpoint groups
 app.include_router(batch_router)
 app.include_router(health_router)
+app.include_router(model_info_router)
 
 
 # ----- Models for /v1/score (single-record demo heuristic) -------------------
