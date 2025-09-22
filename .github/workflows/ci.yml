@@ -1,26 +1,58 @@
-name: ci
+name: CI
 
 on:
   push:
-    branches: [ "main", "dev" ]
+    branches: [ main, develop, feat/**, fix/**, perf/**, chore/** ]
   pull_request:
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install deps
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install -e .
+          pip install -e .[dev]
+
       - name: Lint
-        run: ruff check .
-      - name: Format check
-        run: black --check .
-      - name: Tests
-        run: PYTHONPATH=src pytest -q
+        run: |
+          pip install ruff black
+          ruff check .
+          black --check .
+
+      - name: Run tests
+        run: pytest -q
+
+      - name: Evaluate baseline (if features exist)
+        run: |
+          if [ -f "data/feature_store/contracts_features.parquet" ]; then
+            python -m procurement_risk_detection_ai.models.evaluate_baseline \
+              --features data/feature_store/contracts_features.parquet --features-cols auto --out-dir reports/metrics
+          else
+            echo "No features file found; skipping evaluation."
+          fi
+
+      - name: Upload metrics artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-metrics
+          path: reports/metrics/
+          if-no-files-found: ignore
