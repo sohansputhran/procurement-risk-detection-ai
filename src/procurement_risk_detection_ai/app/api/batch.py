@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Body
 from pydantic import BaseModel, Field
 
 from procurement_risk_detection_ai.app.services.scoring import (
@@ -14,6 +14,9 @@ from procurement_risk_detection_ai.app.services.scoring import (
 from procurement_risk_detection_ai.app.api.provenance import log_provenance
 
 router = APIRouter()
+
+
+# ----------------- IO MODELS -----------------
 
 
 class BatchItem(BaseModel):
@@ -38,6 +41,9 @@ class BatchResponse(BaseModel):
     used_model: bool = True
 
 
+# ----------------- HELPERS -----------------
+
+
 def _load_parquet(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
         return pd.DataFrame()
@@ -49,24 +55,28 @@ def _join_features(df_in: pd.DataFrame, join_graph: bool) -> pd.DataFrame:
         "FEATURES_PATH", "data/feature_store/contracts_features.parquet"
     )
     graph_path = os.getenv("GRAPH_METRICS_PATH", "data/graph/metrics.parquet")
+
     df_feat = _load_parquet(features_path)
     if df_feat.empty:
         return pd.DataFrame()
-
     if "award_id" not in df_feat.columns:
         raise RuntimeError("features parquet missing 'award_id' column")
 
+    # left-join on award_id (includes our _input_row_id carried from df_in)
     df = df_in.merge(df_feat, how="left", on="award_id", suffixes=("", "_feat"))
 
+    # fill supplier_id from features if missing
     if "supplier_id" in df.columns and "supplier_id_feat" in df.columns:
         df["supplier_id"] = (
             df["supplier_id"].fillna(df["supplier_id_feat"]).astype(object)
         )
         df = df.drop(columns=[c for c in ["supplier_id_feat"] if c in df.columns])
 
+    # optional graph join; ensure one row per supplier_id
     if join_graph and os.path.exists(graph_path):
         df_graph = _load_parquet(graph_path)
         if not df_graph.empty and "supplier_id" in df_graph.columns:
+            df_graph = df_graph.groupby("supplier_id", as_index=False).first()
             df = df.merge(
                 df_graph, how="left", on="supplier_id", suffixes=("", "_graph")
             )
@@ -74,19 +84,37 @@ def _join_features(df_in: pd.DataFrame, join_graph: bool) -> pd.DataFrame:
     return df
 
 
-@router.post("/v1/score/batch", response_model=BatchResponse)
-def batch_score(payload: Any, join_graph: bool = Query(False)):
+def _normalize_payload(payload: Any) -> tuple[List[Dict[str, Any]], bool]:
+    """
+    Returns (items, list_in)
+    - list_in=True  -> caller posted a plain list
+    - list_in=False -> caller posted {"items":[...]}
+    """
+    if isinstance(payload, list):
+        return payload, True
+    if isinstance(payload, dict) and isinstance(payload.get("items"), list):
+        return payload["items"], False
+    return [], False
+
+
+# ----------------- ENDPOINT -----------------
+
+
+@router.post(
+    "/v1/score/batch", response_model=Union[List[BatchResponseItem], BatchResponse]
+)
+def batch_score(payload: Any = Body(...), join_graph: bool = Query(False)):
     """
     Accepts either:
-      1) {"items":[{...}]}
-      2) plain list [{...}]
+      1) plain list:       [{...}, {...}]              -> returns a plain list
+      2) object envelope:  {"items":[{...}, {...}]}    -> returns an envelope with metadata
     """
     started = __import__("time").time()
-    items = payload.get("items") if isinstance(payload, dict) else payload
-    if not isinstance(items, list):
-        items = []
 
+    items, list_in = _normalize_payload(payload)
     df_in = pd.DataFrame(items)
+
+    # Validate input awards
     if df_in.empty or "award_id" not in df_in.columns:
         prov_id = log_provenance(
             endpoint="/v1/score/batch",
@@ -96,10 +124,18 @@ def batch_score(payload: Any, join_graph: bool = Query(False)):
             error="missing award_id",
             num_items=0,
         )
+        # Mirror shape on error as well
+        if list_in:
+            return []
         return BatchResponse(
             items=[], provenance_id=prov_id, used_model=is_model_available()
         )
 
+    # Stable input order + 1:1 cardinality guarantee
+    df_in = df_in.copy()
+    df_in["_input_row_id"] = range(len(df_in))
+
+    # Join features (+ optional graph). Must carry _input_row_id through.
     df_joined = _join_features(df_in, join_graph=join_graph)
     if df_joined.empty:
         prov_id = log_provenance(
@@ -110,11 +146,21 @@ def batch_score(payload: Any, join_graph: bool = Query(False)):
             error="no features found",
             num_items=0,
         )
+        if list_in:
+            return []
         return BatchResponse(
             items=[], provenance_id=prov_id, used_model=is_model_available()
         )
 
-    out_items: List[Dict[str, Any]] = []
+    # Enforce 1 output row per input row even if joins create fanout
+    if "_input_row_id" in df_joined.columns:
+        df_joined = (
+            df_joined.sort_values(["_input_row_id"])
+            .groupby("_input_row_id", as_index=False)
+            .first()
+        )
+
+    out_items: List[BatchResponseItem] = []
     used_model_flag = False
 
     if is_model_available():
@@ -122,31 +168,42 @@ def batch_score(payload: Any, join_graph: bool = Query(False)):
         for _, row in df_joined.iterrows():
             scored = score_row_with_explanations(row, top_k=5)
             out_items.append(
-                {
-                    "award_id": row.get("award_id"),
-                    "supplier_id": row.get("supplier_id"),
-                    "risk_score": scored["risk_score"],
-                    "top_factors": scored["top_factors"],
-                }
+                BatchResponseItem(
+                    award_id=str(row.get("award_id")),
+                    supplier_id=(
+                        str(row.get("supplier_id"))
+                        if pd.notna(row.get("supplier_id"))
+                        else None
+                    ),
+                    risk_score=float(scored["risk_score"]),
+                    top_factors=scored["top_factors"],
+                )
             )
     else:
+        # Fallback heuristic
         for _, row in df_joined.iterrows():
             score = 0.0
             score += 0.4 * float(row.get("near_threshold_flag", 0) == 1)
-            score += 0.3 * (float(row.get("repeat_winner_ratio", 0)))
+            score += 0.3 * float(row.get("repeat_winner_ratio", 0) or 0.0)
             score += 0.2 * max(
-                0.0, min(1.0, float(row.get("amount_zscore_by_category", 0)) / 3.0)
+                0.0,
+                min(1.0, float(row.get("amount_zscore_by_category", 0) or 0.0) / 3.0),
             )
             score += 0.1 * max(
-                0.0, min(1.0, float(row.get("award_concentration_by_buyer", 0)))
+                0.0, min(1.0, float(row.get("award_concentration_by_buyer", 0) or 0.0))
             )
             score = max(0.0, min(1.0, score))
+
             out_items.append(
-                {
-                    "award_id": row.get("award_id"),
-                    "supplier_id": row.get("supplier_id"),
-                    "risk_score": round(score, 6),
-                    "top_factors": [
+                BatchResponseItem(
+                    award_id=str(row.get("award_id")),
+                    supplier_id=(
+                        str(row.get("supplier_id"))
+                        if pd.notna(row.get("supplier_id"))
+                        else None
+                    ),
+                    risk_score=round(float(score), 6),
+                    top_factors=[
                         {
                             "name": "repeat_winner_ratio",
                             "value": row.get("repeat_winner_ratio", None),
@@ -156,7 +213,7 @@ def batch_score(payload: Any, join_graph: bool = Query(False)):
                             "value": row.get("amount_zscore_by_category", None),
                         },
                     ],
-                }
+                )
             )
 
     prov_id = log_provenance(
@@ -167,11 +224,12 @@ def batch_score(payload: Any, join_graph: bool = Query(False)):
         num_items=len(out_items),
     )
 
-    for it in out_items:
-        for k, v in list(it.items()):
-            if v is None:
-                it[k] = None
+    # Mirror caller shape:
+    if list_in:
+        # Return a plain list (so len(response) == len(input))
+        return [it.model_dump() for it in out_items]
 
+    # Return envelope with metadata
     return BatchResponse(
         items=out_items, provenance_id=prov_id, used_model=used_model_flag
     )
