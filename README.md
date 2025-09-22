@@ -88,7 +88,7 @@ Content-Type: application/json
 { "text": "…paste a news paragraph or snippet…" }
 ```
 
-### Batch scoring (features merge + top-factor attributions)
+### Batch scoring (features merge + ML explanations)
 Compute scores for many awards at once by merging prebuilt features and (optionally) **graph metrics**.
 
 **Prerequisites**
@@ -107,7 +107,6 @@ python -m procurement_risk_detection_ai.graph.graph_utils   --tenders  data/cura
 
 ## Streamlit — Datasets & Batch Scoring page
 
-
 Path: `app/ui/pages/1_Datasets.py`
 
 - Shows **dataset availability** and **row counts** by calling `/health`.
@@ -120,22 +119,54 @@ API_URL=http://127.0.0.1:8000
 
 Run the UI:
 ```bash
-
-
-### Download Batch Scores as CSV
-
-The Streamlit UI supports downloading batch scoring results as a CSV with flattened top-factor columns:
-
-- `top_factor_1_name`, `top_factor_1_value`
-- `top_factor_2_name`, `top_factor_2_value`
-- …
-
-This is available on the **Datasets & Batch Scoring** page after running a batch request. The CSV is encoded with UTF-8 (with BOM) for Excel-friendly opening on Windows.
-
 python -m streamlit run app/ui/streamlit_app.py
 ```
 
 ---
+
+
+---
+
+## Baseline ML model (Logistic Regression) + SHAP-style explanations
+
+You can now replace the demo heuristic with a simple ML baseline trained on your curated
+`contracts_features.parquet`. Until labeled outcomes are available, the training script derives
+a **proxy label** from feature heuristics (`near_threshold_flag`, high `amount_zscore_by_category`,
+high `repeat_winner_ratio`, and `award_concentration_by_buyer`).
+
+**Train the baseline**
+```bash
+# Train baseline (saves to models/)
+python -m procurement_risk_detection_ai.models.train_baseline --features data/feature_store/contracts_features.parquet
+```
+
+**How batch scoring uses the model**
+- If `models/baseline_logreg.joblib` exists, `POST /v1/score/batch` will use it to compute:
+  - `risk_score` in [0,1]
+  - `top_factors` — linear logit contributions per feature (sorted by absolute magnitude; SHAP-style)
+- If no model is found, the endpoint **falls back** to the previous heuristic rules.
+
+**Response shape (excerpt)**
+```json
+{
+  "items": [
+    {
+      "award_id": "A1",
+      "supplier_id": "S1",
+      "risk_score": 0.78,
+      "top_factors": [
+        {"name": "repeat_winner_ratio", "value": 0.92, "contribution": 1.15},
+        {"name": "amount_zscore_by_category", "value": 2.7, "contribution": 0.84}
+      ]
+    }
+  ],
+  "provenance_id": "abc123...",
+  "used_model": true
+}
+```
+
+> Tip: set `FEATURES_PATH` (and optionally `GRAPH_METRICS_PATH`) so the batch endpoint can merge features (and graph metrics via `?join_graph=true`).
+
 
 ## LLMs: Google Gemini (public-only)
 
@@ -301,41 +332,6 @@ OCDS_AWARDS_PATH=data/curated/ocds/awards.parquet
 ```
 
 ---
-
-
----
-
-## Provenance logging (per request)
-
-All API requests are logged to `data/logs/provenance/YYYY-MM-DD.jsonl`. Each record contains:
-
-- `request_id` (returned in responses as `provenance_id`)
-- timestamp and duration
-- payload preview (first few items for batch)
-- dataset paths from environment variables (`FEATURES_PATH`, `GRAPH_METRICS_PATH`, `WB_INELIGIBLE_PATH`, `OCDS_TENDERS_PATH`, `OCDS_AWARDS_PATH`)
-- status and error (if any)
-
-**Environment variable (optional):**
-```
-PROVENANCE_LOG_DIR=data/logs/provenance
-```
-
-**Windows PowerShell example calls**
-```powershell
-# Single record
-$body = @{
-  amount = 100000
-  past_awards_count = 2
-  is_sanctioned = $false
-  adverse_media_count = 1
-} | ConvertTo-Json
-
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/v1/score" -ContentType "application/json" -Body $body
-
-# Batch
-$items = @(@{award_id="A1"}, @{award_id="A2"})
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/v1/score/batch" -ContentType "application/json" -Body ($items | ConvertTo-Json)
-```
 
 ## License
 

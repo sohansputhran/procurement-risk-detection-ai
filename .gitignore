@@ -75,3 +75,6 @@ ipython_config.p
 
 # Data Source
 data/
+
+# Models
+models/
