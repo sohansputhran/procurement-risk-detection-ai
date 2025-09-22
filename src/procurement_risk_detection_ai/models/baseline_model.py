@@ -86,7 +86,7 @@ def fit_baseline(
     clf = LogisticRegression(max_iter=1000)
     clf.fit(X, y)
     save_model(clf, feature_cols)
-    # return clf
+    return clf  # <-- critical fix
 
 
 def predict_proba_and_contrib(
