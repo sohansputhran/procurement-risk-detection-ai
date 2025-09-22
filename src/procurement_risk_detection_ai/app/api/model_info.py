@@ -27,10 +27,7 @@ class _TopWeight:
 
 class ModelWeights(BaseModel):
     n_features: Optional[int] = None
-    top_weights: List[Dict[str, Any]] = Field(
-        default_factory=list,
-        description="Top absolute coefficient weights with feature names.",
-    )
+    top_weights: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class EvaluationInfo(BaseModel):
@@ -67,7 +64,6 @@ def _latest_metrics_path() -> Optional[str]:
 def _compute_top_weights(
     model_path: str, feature_cols: Optional[List[str]]
 ) -> ModelWeights:
-    # Return empty if we can’t compute safely
     try:
         import joblib  # type: ignore
     except Exception:
@@ -82,7 +78,6 @@ def _compute_top_weights(
     except Exception:
         return ModelWeights()
 
-    # Expect scikit LogisticRegression with shape (1, n_features)
     coef = getattr(lr, "coef_", None)
     if coef is None:
         return ModelWeights()
@@ -94,7 +89,6 @@ def _compute_top_weights(
         if feature_cols and len(feature_cols) == n_features
         else [f"f{i}" for i in range(n_features)]
     )
-
     weights = [
         _TopWeight(name=names[i], weight=float(coef[i]), abs_weight=float(abs(coef[i])))
         for i in range(n_features)
@@ -116,7 +110,6 @@ def get_model_info() -> ModelInfo:
 
     weights = _compute_top_weights(MODEL_PATH, feature_cols)
 
-    # Latest evaluation metrics (if any)
     eval_path = _latest_metrics_path()
     eval_metrics = _read_json_if_exists(eval_path) if eval_path else None
     evaluation = (
