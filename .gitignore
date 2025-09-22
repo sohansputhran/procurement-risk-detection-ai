@@ -77,7 +77,7 @@ ipython_config.p
 data/
 
 # Models
-models/
+models_data/
 
 # Reports
 reports/
