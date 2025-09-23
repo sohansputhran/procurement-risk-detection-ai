@@ -8,14 +8,13 @@ import pandas as pd
 from fastapi import APIRouter, Body, Query
 from pydantic import BaseModel, Field
 
-# v1/v2 compatible field validator alias
+# ---- Pydantic v1/v2 compatible field validator alias ----
 try:  # Pydantic v2
     from pydantic import field_validator  # type: ignore
 except Exception:  # Pydantic v1 fallback
     from pydantic import validator as _v1_validator  # type: ignore
 
     def field_validator(field_name: str, *, mode: str = "after"):
-        # mimic v2 API using v1's validator()
         pre = mode == "before"
 
         def _decorator(fn):
@@ -36,13 +35,39 @@ from procurement_risk_detection_ai.models.baseline_model import (
 
 router = APIRouter()
 
+# ----------------------------- Env helpers (no settings import) -----------------------------
 
-# ----------------------------- Settings (lazy import) -----------------------------
-def _settings():
-    # Lazy import to avoid circular import during app startup/tests
-    from procurement_risk_detection_ai.config.settings import get_settings as _gs
 
-    return _gs()
+def _env_bool(name: str, default: bool = False) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return str(val).strip().lower() in ("1", "true", "yes", "y", "t")
+
+
+def _env_int(name: str, default_val: int) -> int:
+    try:
+        return int(os.getenv(name, str(default_val)))
+    except Exception:
+        return default_val
+
+
+def _paths() -> Dict[str, str]:
+    return {
+        "FEATURES_PATH": os.getenv(
+            "FEATURES_PATH", "data/feature_store/contracts_features.parquet"
+        ),
+        "GRAPH_METRICS_PATH": os.getenv(
+            "GRAPH_METRICS_PATH", "data/graph/metrics.parquet"
+        ),
+    }
+
+
+def _limits() -> Dict[str, int]:
+    return {
+        "DEFAULT_TOP_K": _env_int("DEFAULT_TOP_K", 5),
+        "MAX_BATCH_ITEMS": _env_int("MAX_BATCH_ITEMS", 1000),
+    }
 
 
 # ----------------------------- Pydantic models -----------------------------
@@ -52,7 +77,7 @@ class BatchItem(BaseModel):
     award_id: str = Field(..., description="Award id; must exist in features parquet")
     supplier_id: Optional[str] = None
 
-    @field_validator("award_id")  # works in v2; maps to v1 under the hood
+    @field_validator("award_id")
     @classmethod
     def _non_empty(cls, v: str) -> str:
         if v is None or str(v).strip() == "":
@@ -88,13 +113,11 @@ def _load_parquet(path: str) -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
-# Cache for the HOT features parquet
 _FEATURES_CACHE: Dict[str, Any] = {"path": None, "mtime": None, "df": None}
 
 
 def _features_cache_disabled() -> bool:
-    # Read from env-backed settings at call time (so tests can change env)
-    return _settings().FEATURES_CACHE_DISABLE
+    return _env_bool("FEATURES_CACHE_DISABLE", False)
 
 
 def _load_parquet_cached(path: str) -> pd.DataFrame:
@@ -112,9 +135,9 @@ def _load_parquet_cached(path: str) -> pd.DataFrame:
 
 
 def _join_features(df_in: pd.DataFrame, join_graph: bool) -> pd.DataFrame:
-    s = _settings()
-    features_path = s.FEATURES_PATH
-    graph_path = s.GRAPH_METRICS_PATH
+    P = _paths()
+    features_path = P["FEATURES_PATH"]
+    graph_path = P["GRAPH_METRICS_PATH"]
 
     df_feat = _load_parquet_cached(features_path)
     if df_feat.empty:
@@ -155,7 +178,7 @@ def batch_score(
     join_graph: bool = Query(
         False, description="Join supplier graph metrics if available."
     ),
-    # Default is None so we resolve from settings at runtime (prevents import-time env capture)
+    # Default is None → we read DEFAULT_TOP_K at request-time (no import-time env capture)
     limit_top_factors: Optional[int] = Query(
         None, ge=1, le=20, description="Max number of explanation factors to include."
     ),
@@ -167,9 +190,9 @@ def batch_score(
     Preserves 1:1 input→output, annotating invalid rows with `error`.
     """
     started = __import__("time").time()
-    s = _settings()
+    L = _limits()
     if limit_top_factors is None:
-        limit_top_factors = s.DEFAULT_TOP_K
+        limit_top_factors = L["DEFAULT_TOP_K"]
 
     # Normalize input and remember original shape for mirroring
     input_was_list = isinstance(payload, list)
@@ -178,8 +201,8 @@ def batch_score(
         items_raw = []
 
     # Soft guard for very large batches
-    if len(items_raw) > s.MAX_BATCH_ITEMS:
-        items_raw = items_raw[: s.MAX_BATCH_ITEMS]
+    if len(items_raw) > L["MAX_BATCH_ITEMS"]:
+        items_raw = items_raw[: L["MAX_BATCH_ITEMS"]]
 
     # Validate each row but keep 1:1 cardinality
     validated: List[Dict[str, Any]] = []
@@ -191,6 +214,8 @@ def batch_score(
                 {"award_id": model.award_id, "supplier_id": model.supplier_id}
             )
         except Exception as ve:
+            # Pydantic v1/v2: stringify error
+            msg = str(ve)
             validated.append(
                 {
                     "award_id": (
@@ -198,7 +223,7 @@ def batch_score(
                     )
                 }
             )
-            errors_by_idx[i] = "; ".join(err["msg"] for err in ve.errors())
+            errors_by_idx[i] = msg
 
     # If everything invalid, return per-item errors (shape mirrored)
     if len(errors_by_idx) == len(validated) and len(validated) > 0:
