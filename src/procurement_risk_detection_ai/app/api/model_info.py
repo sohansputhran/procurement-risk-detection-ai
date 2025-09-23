@@ -12,10 +12,20 @@ from pydantic import BaseModel, Field
 
 router = APIRouter()
 
-MODELS_DIR = os.getenv("MODELS_DIR", "models")
-MODEL_PATH = os.getenv("MODEL_PATH", f"{MODELS_DIR}/baseline_logreg.joblib")
-META_PATH = os.getenv("MODEL_META_PATH", f"{MODELS_DIR}/baseline_logreg_meta.json")
-METRICS_DIR = os.getenv("METRICS_DIR", "reports/metrics")
+# ----------------------------- Env helpers -----------------------------
+
+
+def _env(name: str, default: str) -> str:
+    return os.getenv(name, default)
+
+
+def _paths() -> Dict[str, str]:
+    models_dir = _env("MODELS_DIR", "models")
+    return {
+        "MODEL_PATH": _env("MODEL_PATH", f"{models_dir}/baseline_logreg.joblib"),
+        "META_PATH": _env("MODEL_META_PATH", f"{models_dir}/baseline_logreg_meta.json"),
+        "METRICS_DIR": _env("METRICS_DIR", "reports/metrics"),
+    }
 
 
 @dataclass
@@ -42,6 +52,7 @@ class ModelInfo(BaseModel):
     trained_at: Optional[str] = None
     feature_cols: Optional[List[str]] = None
     class_weight: Optional[Dict[str, float]] = None
+    risk_band_thresholds: Optional[Dict[str, float]] = None
     weights: ModelWeights = Field(default_factory=ModelWeights)
     evaluation: Optional[EvaluationInfo] = None
 
@@ -56,8 +67,8 @@ def _read_json_if_exists(path: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _latest_metrics_path() -> Optional[str]:
-    paths = sorted(glob.glob(os.path.join(METRICS_DIR, "baseline_metrics_*.json")))
+def _latest_metrics_path(metrics_dir: str) -> Optional[str]:
+    paths = sorted(glob.glob(os.path.join(metrics_dir, "baseline_metrics_*.json")))
     return paths[-1] if paths else None
 
 
@@ -95,22 +106,23 @@ def _compute_top_weights(
     ]
     weights.sort(key=lambda w: w.abs_weight, reverse=True)
     top = [asdict(w) for w in weights[: min(10, len(weights))]]
-
     return ModelWeights(n_features=n_features, top_weights=top)
 
 
 @router.get("/v1/model/info", response_model=ModelInfo)
 def get_model_info() -> ModelInfo:
-    model_exists = Path(MODEL_PATH).exists()
-    meta = _read_json_if_exists(META_PATH) or {}
+    P = _paths()
+    model_exists = Path(P["MODEL_PATH"]).exists()
+    meta = _read_json_if_exists(P["META_PATH"]) or {}
 
     feature_cols: Optional[List[str]] = meta.get("feature_cols")
     trained_at: Optional[str] = meta.get("trained_at") or meta.get("timestamp")
     class_weight = meta.get("class_weight")
+    thresholds = meta.get("risk_band_thresholds")
 
-    weights = _compute_top_weights(MODEL_PATH, feature_cols)
+    weights = _compute_top_weights(P["MODEL_PATH"], feature_cols)
 
-    eval_path = _latest_metrics_path()
+    eval_path = _latest_metrics_path(P["METRICS_DIR"])
     eval_metrics = _read_json_if_exists(eval_path) if eval_path else None
     evaluation = (
         EvaluationInfo(path=eval_path, metrics=eval_metrics or {})
@@ -120,11 +132,12 @@ def get_model_info() -> ModelInfo:
 
     return ModelInfo(
         available=bool(model_exists),
-        model_path=MODEL_PATH if model_exists else None,
-        meta_path=META_PATH if Path(META_PATH).exists() else None,
+        model_path=P["MODEL_PATH"] if model_exists else None,
+        meta_path=P["META_PATH"] if Path(P["META_PATH"]).exists() else None,
         trained_at=trained_at,
         feature_cols=feature_cols,
         class_weight=class_weight,
+        risk_band_thresholds=thresholds,
         weights=weights,
         evaluation=evaluation,
     )

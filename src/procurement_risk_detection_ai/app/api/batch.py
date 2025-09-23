@@ -6,7 +6,22 @@ from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
 from fastapi import APIRouter, Body, Query
-from pydantic import BaseModel, Field, ValidationError, validator
+from pydantic import BaseModel, Field
+
+# ---- Pydantic v1/v2 compatible field validator alias ----
+try:  # Pydantic v2
+    from pydantic import field_validator  # type: ignore
+except Exception:  # Pydantic v1 fallback
+    from pydantic import validator as _v1_validator  # type: ignore
+
+    def field_validator(field_name: str, *, mode: str = "after"):
+        pre = mode == "before"
+
+        def _decorator(fn):
+            return _v1_validator(field_name, pre=pre, allow_reuse=True)(fn)
+
+        return _decorator
+
 
 from procurement_risk_detection_ai.app.services.scoring import (
     is_model_available,
@@ -20,6 +35,40 @@ from procurement_risk_detection_ai.models.baseline_model import (
 
 router = APIRouter()
 
+# ----------------------------- Env helpers (no settings import) -----------------------------
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return str(val).strip().lower() in ("1", "true", "yes", "y", "t")
+
+
+def _env_int(name: str, default_val: int) -> int:
+    try:
+        return int(os.getenv(name, str(default_val)))
+    except Exception:
+        return default_val
+
+
+def _paths() -> Dict[str, str]:
+    return {
+        "FEATURES_PATH": os.getenv(
+            "FEATURES_PATH", "data/feature_store/contracts_features.parquet"
+        ),
+        "GRAPH_METRICS_PATH": os.getenv(
+            "GRAPH_METRICS_PATH", "data/graph/metrics.parquet"
+        ),
+    }
+
+
+def _limits() -> Dict[str, int]:
+    return {
+        "DEFAULT_TOP_K": _env_int("DEFAULT_TOP_K", 5),
+        "MAX_BATCH_ITEMS": _env_int("MAX_BATCH_ITEMS", 1000),
+    }
+
 
 # ----------------------------- Pydantic models -----------------------------
 
@@ -28,7 +77,8 @@ class BatchItem(BaseModel):
     award_id: str = Field(..., description="Award id; must exist in features parquet")
     supplier_id: Optional[str] = None
 
-    @validator("award_id")
+    @field_validator("award_id")
+    @classmethod
     def _non_empty(cls, v: str) -> str:
         if v is None or str(v).strip() == "":
             raise ValueError("award_id must be a non-empty string")
@@ -64,15 +114,14 @@ def _load_parquet(path: str) -> pd.DataFrame:
 
 
 _FEATURES_CACHE: Dict[str, Any] = {"path": None, "mtime": None, "df": None}
-_FEATURES_CACHE_DISABLED = os.getenv("FEATURES_CACHE_DISABLE", "false").lower() in (
-    "1",
-    "true",
-    "yes",
-)
+
+
+def _features_cache_disabled() -> bool:
+    return _env_bool("FEATURES_CACHE_DISABLE", False)
 
 
 def _load_parquet_cached(path: str) -> pd.DataFrame:
-    if _FEATURES_CACHE_DISABLED:
+    if _features_cache_disabled():
         return _load_parquet(path)
     p = Path(path)
     if not p.exists():
@@ -86,10 +135,9 @@ def _load_parquet_cached(path: str) -> pd.DataFrame:
 
 
 def _join_features(df_in: pd.DataFrame, join_graph: bool) -> pd.DataFrame:
-    features_path = os.getenv(
-        "FEATURES_PATH", "data/feature_store/contracts_features.parquet"
-    )
-    graph_path = os.getenv("GRAPH_METRICS_PATH", "data/graph/metrics.parquet")
+    P = _paths()
+    features_path = P["FEATURES_PATH"]
+    graph_path = P["GRAPH_METRICS_PATH"]
 
     df_feat = _load_parquet_cached(features_path)
     if df_feat.empty:
@@ -97,14 +145,17 @@ def _join_features(df_in: pd.DataFrame, join_graph: bool) -> pd.DataFrame:
     if "award_id" not in df_feat.columns:
         raise RuntimeError("features parquet missing 'award_id' column")
 
+    # left-join on award_id (includes our _input_row_id carried from df_in)
     df = df_in.merge(df_feat, how="left", on="award_id", suffixes=("", "_feat"))
 
+    # fill supplier_id from features if missing
     if "supplier_id" in df.columns and "supplier_id_feat" in df.columns:
         df["supplier_id"] = (
             df["supplier_id"].fillna(df["supplier_id_feat"]).astype(object)
         )
         df = df.drop(columns=[c for c in ["supplier_id_feat"] if c in df.columns])
 
+    # optional graph join; ensure one row per supplier_id
     if join_graph and os.path.exists(graph_path):
         df_graph = _load_parquet(graph_path)
         if not df_graph.empty and "supplier_id" in df_graph.columns:
@@ -127,8 +178,9 @@ def batch_score(
     join_graph: bool = Query(
         False, description="Join supplier graph metrics if available."
     ),
-    limit_top_factors: int = Query(
-        5, ge=1, le=20, description="Max number of explanation factors to include."
+    # Default is None → we read DEFAULT_TOP_K at request-time (no import-time env capture)
+    limit_top_factors: Optional[int] = Query(
+        None, ge=1, le=20, description="Max number of explanation factors to include."
     ),
 ):
     """
@@ -138,23 +190,32 @@ def batch_score(
     Preserves 1:1 input→output, annotating invalid rows with `error`.
     """
     started = __import__("time").time()
+    L = _limits()
+    if limit_top_factors is None:
+        limit_top_factors = L["DEFAULT_TOP_K"]
 
+    # Normalize input and remember original shape for mirroring
     input_was_list = isinstance(payload, list)
     items_raw = payload.get("items") if isinstance(payload, dict) else payload
     if not isinstance(items_raw, list):
         items_raw = []
+
+    # Soft guard for very large batches
+    if len(items_raw) > L["MAX_BATCH_ITEMS"]:
+        items_raw = items_raw[: L["MAX_BATCH_ITEMS"]]
 
     # Validate each row but keep 1:1 cardinality
     validated: List[Dict[str, Any]] = []
     errors_by_idx: Dict[int, str] = {}
     for i, obj in enumerate(items_raw):
         try:
-            # Accept only dicts; other types become validation errors
             model = BatchItem.parse_obj(obj if isinstance(obj, dict) else {})
             validated.append(
                 {"award_id": model.award_id, "supplier_id": model.supplier_id}
             )
-        except ValidationError as ve:
+        except Exception as ve:
+            # Pydantic v1/v2: stringify error
+            msg = str(ve)
             validated.append(
                 {
                     "award_id": (
@@ -162,10 +223,10 @@ def batch_score(
                     )
                 }
             )
-            errors_by_idx[i] = "; ".join(err["msg"] for err in ve.errors())
+            errors_by_idx[i] = msg
 
     # If everything invalid, return per-item errors (shape mirrored)
-    if len(errors_by_idx) == len(validated):
+    if len(errors_by_idx) == len(validated) and len(validated) > 0:
         out_items = [
             {
                 "award_id": row.get("award_id"),
@@ -206,7 +267,6 @@ def batch_score(
             error="no features found",
             num_items=0,
         )
-        # Fall back to per-item errors for the valid ones
         out_items = []
         for idx, row in enumerate(validated):
             msg = errors_by_idx.get(idx) or "no features found"
@@ -257,7 +317,7 @@ def batch_score(
                     }
                 )
                 continue
-            scored = score_row_with_explanations(row, top_k=limit_top_factors)
+            scored = score_row_with_explanations(row, top_k=int(limit_top_factors))
             rb = band_from_score(scored["risk_score"], thresholds)
             out_items.append(
                 {
@@ -302,7 +362,7 @@ def batch_score(
             score = max(0.0, min(1.0, score))
             tf = [
                 {"name": name, "value": row.get(name, None)}
-                for name in factor_candidates[:limit_top_factors]
+                for name in factor_candidates[: int(limit_top_factors)]
             ]
             rb = band_from_score(score, thresholds)
             out_items.append(

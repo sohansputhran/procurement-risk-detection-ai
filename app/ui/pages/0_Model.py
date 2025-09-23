@@ -34,6 +34,15 @@ if tw:
 else:
     st.info("No weights available.")
 
+st.subheader("Risk band thresholds")
+thr = info.get("risk_band_thresholds") or {}
+if thr:
+    cols = st.columns(2)
+    cols[0].metric("Low band max", f"{thr.get('low_max'):.3f}")
+    cols[1].metric("Medium band max", f"{thr.get('medium_max'):.3f}")
+else:
+    st.info("No thresholds found in model meta.")
+
 st.subheader("Latest evaluation metrics")
 ev = info.get("evaluation") or {}
 metrics = ev.get("metrics") or {}
