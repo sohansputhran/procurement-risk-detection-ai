@@ -1,12 +1,26 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
 from fastapi import APIRouter, Body, Query, Request
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
+
+
+from procurement_risk_detection_ai.app.services.scoring import (
+    is_model_available,
+    score_row_with_explanations,
+    score_batch_vectorized,  # NEW
+)
+from procurement_risk_detection_ai.app.api.provenance import log_provenance
+from procurement_risk_detection_ai.models.baseline_model import (
+    load_model_meta,
+    band_from_score,
+)
 
 # ---- Pydantic v1/v2 compatible field validator alias ----
 try:  # Pydantic v2
@@ -23,15 +37,36 @@ except Exception:  # Pydantic v1 fallback
         return _decorator
 
 
-from procurement_risk_detection_ai.app.services.scoring import (
-    is_model_available,
-    score_row_with_explanations,
-)
-from procurement_risk_detection_ai.app.api.provenance import log_provenance
-from procurement_risk_detection_ai.models.baseline_model import (
-    load_model_meta,
-    band_from_score,
-)
+# ---- Optional Prometheus metrics (no-op if lib missing) ----
+_PROM_OK = True
+try:
+    from prometheus_client import Counter, Histogram, generate_latest
+
+    REQ_TOTAL = Counter("api_requests_total", "API requests", ["endpoint", "status"])
+    LATENCY = Histogram("request_latency_seconds", "Request latency", ["endpoint"])
+    ITEMS = Counter(
+        "batch_scored_items_total",
+        "Items scored in batch",
+        ["used_model", "join_graph", "explain"],
+    )
+except Exception:  # pragma: no cover
+    _PROM_OK = False
+
+    class _Noop:
+        def labels(self, *_, **__):
+            return self
+
+        def inc(self, *_):
+            pass
+
+        def observe(self, *_):
+            pass
+
+    REQ_TOTAL = LATENCY = ITEMS = _Noop()  # type: ignore
+
+    def generate_latest():  # type: ignore
+        return b"# metrics disabled\n"
+
 
 router = APIRouter()
 
@@ -174,6 +209,19 @@ def _join_features(df_in: pd.DataFrame, join_graph: bool) -> pd.DataFrame:
     return df
 
 
+# ----------------------------- /metrics -----------------------------
+
+
+@router.get("/metrics")
+def metrics():
+    # Return Prometheus exposition format or 503 if disabled
+    body = generate_latest()
+    status = 200 if _PROM_OK else 503
+    return PlainTextResponse(
+        body, status_code=status, media_type="text/plain; version=0.0.4; charset=utf-8"
+    )
+
+
 # ----------------------------- Score route -----------------------------
 
 
@@ -200,7 +248,8 @@ def batch_score(
       2) plain list [{...}] → returns a plain list
     Preserves 1:1 input→output, annotating invalid rows with `error`.
     """
-    started = __import__("time").time()
+    started = time.time()
+    endpoint_name = "score_batch"
 
     # Optional raw size guard via Content-Length (best-effort)
     max_bytes = _env_bytes("MAX_REQUEST_BYTES", 1_048_576)  # 1 MiB default
@@ -234,6 +283,8 @@ def batch_score(
             error="request too large",
             num_items=len(out_items),
         )
+        REQ_TOTAL.labels(endpoint=endpoint_name, status="413").inc()
+        LATENCY.labels(endpoint=endpoint_name).observe(time.time() - started)
         return (
             out_items
             if input_was_list
@@ -299,6 +350,8 @@ def batch_score(
             error="validation",
             num_items=len(out_items),
         )
+        REQ_TOTAL.labels(endpoint=endpoint_name, status="400").inc()
+        LATENCY.labels(endpoint=endpoint_name).observe(time.time() - started)
         return (
             out_items
             if input_was_list
@@ -333,6 +386,8 @@ def batch_score(
                     "error": msg,
                 }
             )
+        REQ_TOTAL.labels(endpoint=endpoint_name, status="404").inc()
+        LATENCY.labels(endpoint=endpoint_name).observe(time.time() - started)
         return (
             out_items
             if input_was_list
@@ -355,82 +410,104 @@ def batch_score(
     out_items: List[Dict[str, Any]] = []
     used_model_flag = False
 
-    if is_model_available():
+    # ----------- Fast vectorized path when model available & explain==False -----------
+    if is_model_available() and not explain:
         used_model_flag = True
-        for idx, row in df_joined.iterrows():
-            if idx in errors_by_idx:
-                out_items.append(
-                    {
-                        "award_id": row.get("award_id"),
-                        "supplier_id": row.get("supplier_id"),
-                        "risk_score": None,
-                        "risk_band": None,
-                        "top_factors": [],
-                        "error": errors_by_idx[idx],
-                    }
-                )
-                continue
-            scored = score_row_with_explanations(row, top_k=int(effective_top_k))
-            rb = band_from_score(scored["risk_score"], thresholds)
+        # Vectorized probability prediction (optionally calibrated if available)
+        probs = score_batch_vectorized(df_joined)
+        for (_, row), p in zip(df_joined.iterrows(), probs):
+            rb = band_from_score(float(p), thresholds)
             out_items.append(
                 {
                     "award_id": row.get("award_id"),
                     "supplier_id": row.get("supplier_id"),
-                    "risk_score": scored["risk_score"],
+                    "risk_score": float(p),
                     "risk_band": rb,
-                    "top_factors": scored["top_factors"] if explain else [],
+                    "top_factors": [],
                 }
             )
+
     else:
-        factor_candidates = [
-            "repeat_winner_ratio",
-            "amount_zscore_by_category",
-            "award_concentration_by_buyer",
-            "near_threshold_flag",
-            "time_to_award_days",
-        ]
-        for idx, row in df_joined.iterrows():
-            if idx in errors_by_idx:
+        # ----------- Existing paths (model + explanations OR heuristic) -----------
+        if is_model_available():
+            used_model_flag = True
+            for idx, row in df_joined.iterrows():
+                if idx in errors_by_idx:
+                    out_items.append(
+                        {
+                            "award_id": row.get("award_id"),
+                            "supplier_id": row.get("supplier_id"),
+                            "risk_score": None,
+                            "risk_band": None,
+                            "top_factors": [],
+                            "error": errors_by_idx[idx],
+                        }
+                    )
+                    continue
+                scored = score_row_with_explanations(row, top_k=int(effective_top_k))
+                rb = band_from_score(scored["risk_score"], thresholds)
                 out_items.append(
                     {
                         "award_id": row.get("award_id"),
                         "supplier_id": row.get("supplier_id"),
-                        "risk_score": None,
-                        "risk_band": None,
-                        "top_factors": [],
-                        "error": errors_by_idx[idx],
+                        "risk_score": scored["risk_score"],
+                        "risk_band": rb,
+                        "top_factors": scored["top_factors"] if explain else [],
                     }
                 )
-                continue
-            score = 0.0
-            score += 0.4 * float(row.get("near_threshold_flag", 0) == 1)
-            score += 0.3 * float(row.get("repeat_winner_ratio", 0) or 0.0)
-            score += 0.2 * max(
-                0.0,
-                min(1.0, float(row.get("amount_zscore_by_category", 0) or 0.0) / 3.0),
-            )
-            score += 0.1 * max(
-                0.0, min(1.0, float(row.get("award_concentration_by_buyer", 0) or 0.0))
-            )
-            score = max(0.0, min(1.0, score))
-            tf = (
-                []
-                if not explain
-                else [
-                    {"name": name, "value": row.get(name, None)}
-                    for name in factor_candidates[: int(effective_top_k)]
-                ]
-            )
-            rb = band_from_score(score, thresholds)
-            out_items.append(
-                {
-                    "award_id": row.get("award_id"),
-                    "supplier_id": row.get("supplier_id"),
-                    "risk_score": round(score, 6),
-                    "risk_band": rb,
-                    "top_factors": tf,
-                }
-            )
+        else:
+            factor_candidates = [
+                "repeat_winner_ratio",
+                "amount_zscore_by_category",
+                "award_concentration_by_buyer",
+                "near_threshold_flag",
+                "time_to_award_days",
+            ]
+            for idx, row in df_joined.iterrows():
+                if idx in errors_by_idx:
+                    out_items.append(
+                        {
+                            "award_id": row.get("award_id"),
+                            "supplier_id": row.get("supplier_id"),
+                            "risk_score": None,
+                            "risk_band": None,
+                            "top_factors": [],
+                            "error": errors_by_idx[idx],
+                        }
+                    )
+                    continue
+                score = 0.0
+                score += 0.4 * float(row.get("near_threshold_flag", 0) == 1)
+                score += 0.3 * float(row.get("repeat_winner_ratio", 0) or 0.0)
+                score += 0.2 * max(
+                    0.0,
+                    min(
+                        1.0, float(row.get("amount_zscore_by_category", 0) or 0.0) / 3.0
+                    ),
+                )
+                score += 0.1 * max(
+                    0.0,
+                    min(1.0, float(row.get("award_concentration_by_buyer", 0) or 0.0)),
+                )
+                score = max(0.0, min(1.0, score))
+                tf = (
+                    []
+                    if not explain
+                    else [
+                        {"name": name, "value": row.get(name, None)}
+                        for name in factor_candidates[: int(effective_top_k)]
+                    ]
+                )
+                rb = band_from_score(score, thresholds)
+                out_items.append(
+                    {
+                        "award_id": row.get("award_id"),
+                        "supplier_id": row.get("supplier_id"),
+                        "risk_score": round(score, 6),
+                        "risk_band": rb,
+                        "top_factors": tf,
+                    }
+                )
 
     prov_id = log_provenance(
         endpoint="/v1/score/batch",
@@ -439,6 +516,15 @@ def batch_score(
         status="ok",
         num_items=len(out_items),
     )
+
+    # Metrics
+    REQ_TOTAL.labels(endpoint=endpoint_name, status="200").inc()
+    LATENCY.labels(endpoint=endpoint_name).observe(time.time() - started)
+    ITEMS.labels(
+        used_model=str(used_model_flag).lower(),
+        join_graph=str(join_graph).lower(),
+        explain=str(explain).lower(),
+    ).inc(len(out_items))
 
     # Clean NaNs
     for it in out_items:
@@ -479,7 +565,7 @@ def batch_validate(payload: Any = Body(...)):
     Validate-only: checks schema (award_id non-empty) and that award_id exists in FEATURES_PATH.
     Mirrors input shape (list→list, envelope→envelope). Does NOT score.
     """
-    started = __import__("time").time()
+    started = time.time()
     # Normalize input and remember original shape for mirroring
     input_was_list = isinstance(payload, list)
     items_raw = payload.get("items") if isinstance(payload, dict) else payload
@@ -569,6 +655,8 @@ def batch_validate(payload: Any = Body(...)):
         status="ok",
         num_items=len(out_items),
     )
+    REQ_TOTAL.labels(endpoint="score_validate", status="200").inc()
+    LATENCY.labels(endpoint="score_validate").observe(time.time() - started)
     return (
         out_items
         if input_was_list

@@ -25,3 +25,5 @@ matplotlib
 scikit-learn>=1.2,<2.0
 joblib
 fastparquet
+
+prometheus_client
