@@ -157,11 +157,17 @@ curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch?join_graph=true" ^
 #### Query parameters
 - `join_graph` (bool, default **false**): If `true`, left-joins supplier-level graph metrics when `GRAPH_METRICS_PATH` exists.
 - `limit_top_factors` (int, **1–20**, default **5** or `DEFAULT_TOP_K`): Caps the number of explanation factors per item. Only affects `top_factors`; **risk_score is unchanged**.
+- `explain` (bool, default **true**): If `false`, the API **skips** per-item `top_factors` generation and returns **only** `risk_score` and `risk_band` (faster).
 
 **Example**
 ```bash
-# Envelope-in → Envelope-out, join graph + show top 3 factors per item
-curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch?join_graph=true&limit_top_factors=3" ^
+# Envelope-in → Envelope-out, join graph + top 3 factors + explanations
+curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch?join_graph=true&limit_top_factors=3&explain=true" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"items\":[{\"award_id\":\"A1\"},{\"award_id\":\"A2\"}]}"
+
+# Same request, but skip explanations to speed up:
+curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch?join_graph=true&explain=false" ^
   -H "Content-Type: application/json" ^
   -d "{\"items\":[{\"award_id\":\"A1\"},{\"award_id\":\"A2\"}]}"
 ```
@@ -223,7 +229,8 @@ POST /v1/score/validate
 - Upload a CSV (`award_id`, optional `supplier_id`) → calls `/v1/score/batch`.
 - Controls:
   - **Join graph metrics** toggle
-  - **Top factors** slider (1–20) → passes `limit_top_factors`
+  - **Explain (top factors)** toggle (skip explanations for faster scoring)
+  - **Top factors** slider (1–20) → passes `limit_top_factors` (ignored when Explain is off)
   - **Risk band filter** (low/medium/high)
 - Panels:
   - **Errors** table for any per-row validation issues
