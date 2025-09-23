@@ -174,7 +174,7 @@ def _join_features(df_in: pd.DataFrame, join_graph: bool) -> pd.DataFrame:
     return df
 
 
-# ----------------------------- Route -----------------------------
+# ----------------------------- Score route -----------------------------
 
 
 @router.post(
@@ -186,9 +186,12 @@ def batch_score(
     join_graph: bool = Query(
         False, description="Join supplier graph metrics if available."
     ),
-    # Default is None → we read DEFAULT_TOP_K at request-time (no import-time env capture)
+    # Default None -> resolved from env per-request; keeps tests deterministic
     limit_top_factors: Optional[int] = Query(
         None, ge=1, le=20, description="Max number of explanation factors to include."
+    ),
+    explain: bool = Query(
+        True, description="If false, skip per-item top_factors generation."
     ),
 ):
     """
@@ -198,6 +201,7 @@ def batch_score(
     Preserves 1:1 input→output, annotating invalid rows with `error`.
     """
     started = __import__("time").time()
+
     # Optional raw size guard via Content-Length (best-effort)
     max_bytes = _env_bytes("MAX_REQUEST_BYTES", 1_048_576)  # 1 MiB default
     cl = request.headers.get("content-length")
@@ -241,6 +245,7 @@ def batch_score(
     L = _limits()
     if limit_top_factors is None:
         limit_top_factors = L["DEFAULT_TOP_K"]
+    effective_top_k = 0 if not explain else int(limit_top_factors)
 
     # Normalize input and remember original shape for mirroring
     input_was_list = isinstance(payload, list)
@@ -365,7 +370,7 @@ def batch_score(
                     }
                 )
                 continue
-            scored = score_row_with_explanations(row, top_k=int(limit_top_factors))
+            scored = score_row_with_explanations(row, top_k=int(effective_top_k))
             rb = band_from_score(scored["risk_score"], thresholds)
             out_items.append(
                 {
@@ -373,7 +378,7 @@ def batch_score(
                     "supplier_id": row.get("supplier_id"),
                     "risk_score": scored["risk_score"],
                     "risk_band": rb,
-                    "top_factors": scored["top_factors"],
+                    "top_factors": scored["top_factors"] if explain else [],
                 }
             )
     else:
@@ -408,10 +413,14 @@ def batch_score(
                 0.0, min(1.0, float(row.get("award_concentration_by_buyer", 0) or 0.0))
             )
             score = max(0.0, min(1.0, score))
-            tf = [
-                {"name": name, "value": row.get(name, None)}
-                for name in factor_candidates[: int(limit_top_factors)]
-            ]
+            tf = (
+                []
+                if not explain
+                else [
+                    {"name": name, "value": row.get(name, None)}
+                    for name in factor_candidates[: int(effective_top_k)]
+                ]
+            )
             rb = band_from_score(score, thresholds)
             out_items.append(
                 {
@@ -565,6 +574,3 @@ def batch_validate(payload: Any = Body(...)):
         if input_was_list
         else ValidateResponse(items=out_items, provenance_id=prov_id)
     )
-
-
-# ----------------------------- Model info route (for UI) -----------------------------
