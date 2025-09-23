@@ -17,6 +17,7 @@ from procurement_risk_detection_ai.models.baseline_model import (
     load_model_meta,
     band_from_score,
 )
+from procurement_risk_detection_ai.config.settings import get_settings
 
 router = APIRouter()
 
@@ -64,11 +65,7 @@ def _load_parquet(path: str) -> pd.DataFrame:
 
 
 _FEATURES_CACHE: Dict[str, Any] = {"path": None, "mtime": None, "df": None}
-_FEATURES_CACHE_DISABLED = os.getenv("FEATURES_CACHE_DISABLE", "false").lower() in (
-    "1",
-    "true",
-    "yes",
-)
+_FEATURES_CACHE_DISABLED = get_settings().FEATURES_CACHE_DISABLE
 
 
 def _load_parquet_cached(path: str) -> pd.DataFrame:
@@ -86,10 +83,9 @@ def _load_parquet_cached(path: str) -> pd.DataFrame:
 
 
 def _join_features(df_in: pd.DataFrame, join_graph: bool) -> pd.DataFrame:
-    features_path = os.getenv(
-        "FEATURES_PATH", "data/feature_store/contracts_features.parquet"
-    )
-    graph_path = os.getenv("GRAPH_METRICS_PATH", "data/graph/metrics.parquet")
+    s = get_settings()
+    features_path = s.FEATURES_PATH
+    graph_path = s.GRAPH_METRICS_PATH
 
     df_feat = _load_parquet_cached(features_path)
     if df_feat.empty:
@@ -128,7 +124,10 @@ def batch_score(
         False, description="Join supplier graph metrics if available."
     ),
     limit_top_factors: int = Query(
-        5, ge=1, le=20, description="Max number of explanation factors to include."
+        get_settings().DEFAULT_TOP_K,
+        ge=1,
+        le=20,
+        description="Max number of explanation factors to include.",
     ),
 ):
     """
@@ -143,6 +142,11 @@ def batch_score(
     items_raw = payload.get("items") if isinstance(payload, dict) else payload
     if not isinstance(items_raw, list):
         items_raw = []
+
+    # Soft guard for very large batches
+    s = get_settings()
+    if len(items_raw) > s.MAX_BATCH_ITEMS:
+        items_raw = items_raw[: s.MAX_BATCH_ITEMS]
 
     # Validate each row but keep 1:1 cardinality
     validated: List[Dict[str, Any]] = []
