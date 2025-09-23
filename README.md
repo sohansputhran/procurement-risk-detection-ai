@@ -154,6 +154,27 @@ curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch?join_graph=true" ^
 # → returns: { "items": [...], "provenance_id": "...", "used_model": true }
 ```
 
+#### Speed toggle: `explain=false`
+If you don’t need explanations, pass `explain=false`:
+```
+POST /v1/score/batch?explain=false
+This uses a **vectorized** model path (no per-row loops) and optionally a saved
+**calibrator** (Platt scaling) when present. You still get `risk_score` and `risk_band`
+but `top_factors` will be `[]`.
+```
+
+#### Metrics
+A Prometheus endpoint is available:
+```
+GET /metrics
+
+Counters/histograms:
+- `api_requests_total{endpoint,status}`
+- `request_latency_seconds{endpoint}`
+- `batch_scored_items_total{used_model,join_graph,explain}`
+
+```
+
 #### Query parameters
 - `join_graph` (bool, default **false**): If `true`, left-joins supplier-level graph metrics when `GRAPH_METRICS_PATH` exists.
 - `limit_top_factors` (int, **1–20**, default **5** or `DEFAULT_TOP_K`): Caps the number of explanation factors per item. Only affects `top_factors`; **risk_score is unchanged**.
