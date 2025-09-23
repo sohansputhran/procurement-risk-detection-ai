@@ -17,9 +17,16 @@ from procurement_risk_detection_ai.models.baseline_model import (
     load_model_meta,
     band_from_score,
 )
-from procurement_risk_detection_ai.config.settings import get_settings
 
 router = APIRouter()
+
+
+# ----------------------------- Settings (lazy import) -----------------------------
+def _settings():
+    # Lazy import to avoid circular import during app startup/tests
+    from procurement_risk_detection_ai.config.settings import get_settings as _gs
+
+    return _gs()
 
 
 # ----------------------------- Pydantic models -----------------------------
@@ -64,12 +71,17 @@ def _load_parquet(path: str) -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
+# Cache for the HOT features parquet
 _FEATURES_CACHE: Dict[str, Any] = {"path": None, "mtime": None, "df": None}
-_FEATURES_CACHE_DISABLED = get_settings().FEATURES_CACHE_DISABLE
+
+
+def _features_cache_disabled() -> bool:
+    # Read from env-backed settings at call time (so tests can change env)
+    return _settings().FEATURES_CACHE_DISABLE
 
 
 def _load_parquet_cached(path: str) -> pd.DataFrame:
-    if _FEATURES_CACHE_DISABLED:
+    if _features_cache_disabled():
         return _load_parquet(path)
     p = Path(path)
     if not p.exists():
@@ -83,7 +95,7 @@ def _load_parquet_cached(path: str) -> pd.DataFrame:
 
 
 def _join_features(df_in: pd.DataFrame, join_graph: bool) -> pd.DataFrame:
-    s = get_settings()
+    s = _settings()
     features_path = s.FEATURES_PATH
     graph_path = s.GRAPH_METRICS_PATH
 
@@ -93,14 +105,17 @@ def _join_features(df_in: pd.DataFrame, join_graph: bool) -> pd.DataFrame:
     if "award_id" not in df_feat.columns:
         raise RuntimeError("features parquet missing 'award_id' column")
 
+    # left-join on award_id (includes our _input_row_id carried from df_in)
     df = df_in.merge(df_feat, how="left", on="award_id", suffixes=("", "_feat"))
 
+    # fill supplier_id from features if missing
     if "supplier_id" in df.columns and "supplier_id_feat" in df.columns:
         df["supplier_id"] = (
             df["supplier_id"].fillna(df["supplier_id_feat"]).astype(object)
         )
         df = df.drop(columns=[c for c in ["supplier_id_feat"] if c in df.columns])
 
+    # optional graph join; ensure one row per supplier_id
     if join_graph and os.path.exists(graph_path):
         df_graph = _load_parquet(graph_path)
         if not df_graph.empty and "supplier_id" in df_graph.columns:
@@ -123,11 +138,9 @@ def batch_score(
     join_graph: bool = Query(
         False, description="Join supplier graph metrics if available."
     ),
-    limit_top_factors: int = Query(
-        get_settings().DEFAULT_TOP_K,
-        ge=1,
-        le=20,
-        description="Max number of explanation factors to include.",
+    # Default is None so we resolve from settings at runtime (prevents import-time env capture)
+    limit_top_factors: Optional[int] = Query(
+        None, ge=1, le=20, description="Max number of explanation factors to include."
     ),
 ):
     """
@@ -137,14 +150,17 @@ def batch_score(
     Preserves 1:1 input→output, annotating invalid rows with `error`.
     """
     started = __import__("time").time()
+    s = _settings()
+    if limit_top_factors is None:
+        limit_top_factors = s.DEFAULT_TOP_K
 
+    # Normalize input and remember original shape for mirroring
     input_was_list = isinstance(payload, list)
     items_raw = payload.get("items") if isinstance(payload, dict) else payload
     if not isinstance(items_raw, list):
         items_raw = []
 
     # Soft guard for very large batches
-    s = get_settings()
     if len(items_raw) > s.MAX_BATCH_ITEMS:
         items_raw = items_raw[: s.MAX_BATCH_ITEMS]
 
@@ -153,7 +169,6 @@ def batch_score(
     errors_by_idx: Dict[int, str] = {}
     for i, obj in enumerate(items_raw):
         try:
-            # Accept only dicts; other types become validation errors
             model = BatchItem.parse_obj(obj if isinstance(obj, dict) else {})
             validated.append(
                 {"award_id": model.award_id, "supplier_id": model.supplier_id}
@@ -169,7 +184,7 @@ def batch_score(
             errors_by_idx[i] = "; ".join(err["msg"] for err in ve.errors())
 
     # If everything invalid, return per-item errors (shape mirrored)
-    if len(errors_by_idx) == len(validated):
+    if len(errors_by_idx) == len(validated) and len(validated) > 0:
         out_items = [
             {
                 "award_id": row.get("award_id"),
@@ -210,7 +225,6 @@ def batch_score(
             error="no features found",
             num_items=0,
         )
-        # Fall back to per-item errors for the valid ones
         out_items = []
         for idx, row in enumerate(validated):
             msg = errors_by_idx.get(idx) or "no features found"
@@ -261,7 +275,7 @@ def batch_score(
                     }
                 )
                 continue
-            scored = score_row_with_explanations(row, top_k=limit_top_factors)
+            scored = score_row_with_explanations(row, top_k=int(limit_top_factors))
             rb = band_from_score(scored["risk_score"], thresholds)
             out_items.append(
                 {
@@ -306,7 +320,7 @@ def batch_score(
             score = max(0.0, min(1.0, score))
             tf = [
                 {"name": name, "value": row.get(name, None)}
-                for name in factor_candidates[:limit_top_factors]
+                for name in factor_candidates[: int(limit_top_factors)]
             ]
             rb = band_from_score(score, thresholds)
             out_items.append(
