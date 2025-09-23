@@ -2,7 +2,7 @@
 
 Cloud-native, investigator-friendly analytics to surface integrity risks in public procurement using **public data** and **Google Gemini** for structured extraction.
 
-- **API:** FastAPI (`/health`, `/v1/score`, `/v1/extract/adverse-media`, `/v1/score/batch`, `/v1/model/info`)
+- **API:** FastAPI (`/health`, `/v1/score`, `/v1/extract/adverse-media`, `/v1/score/batch`, `/v1/model/info`, `/v1/score/validate`)
 - **UI:** Streamlit demo (includes **Model info** and **Datasets & Batch Scoring** pages)
 - **ML Baseline:** Logistic Regression with SHAP-style linear contributions
 - **LLM:** Google GenAI SDK (Gemini) with strict, schema-validated JSON output
@@ -76,6 +76,7 @@ Returns the currently deployed baseline model and recent evaluation:
   "trained_at": "2025-09-20T12:34:56Z",
   "feature_cols": ["award_concentration_by_buyer", "repeat_winner_ratio", "..."],
   "class_weight": null,
+  "risk_band_thresholds": { "low_max": 0.33, "medium_max": 0.66 },
   "weights": {
     "n_features": 5,
     "top_weights": [
@@ -155,7 +156,7 @@ curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch?join_graph=true" ^
 
 #### Query parameters
 - `join_graph` (bool, default **false**): If `true`, left-joins supplier-level graph metrics when `GRAPH_METRICS_PATH` exists.
-- `limit_top_factors` (int, **1–20**, default **5**): Caps the number of explanation factors per item. Only affects `top_factors`; **risk_score is unchanged**.
+- `limit_top_factors` (int, **1–20**, default **5** or `DEFAULT_TOP_K`): Caps the number of explanation factors per item. Only affects `top_factors`; **risk_score is unchanged**.
 
 **Example**
 ```bash
@@ -165,11 +166,22 @@ curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch?join_graph=true&limit_
   -d "{\"items\":[{\"award_id\":\"A1\"},{\"award_id\":\"A2\"}]}"
 ```
 
-#### Performance
+#### Validate-only endpoint
+Before scoring, you can precheck inputs and feature availability:
+
+```
+POST /v1/score/validate
+# List-in → list-out, Envelope-in → envelope-out
+# Returns per-item: {award_id, supplier_id, valid: bool, error?: str}
+```
+
+#### Performance & request guards
 - **Features parquet caching**: The API caches the DataFrame loaded from `FEATURES_PATH` by `(path, mtime)` to avoid re-reading on every request.
   - Changes are picked up automatically when the file is replaced or its modification time updates.
   - Graph metrics parquet is smaller/infrequent and is read without caching.
 - **Disable cache (dev only):** set `FEATURES_CACHE_DISABLE=true` to bypass the features cache.
+- **MAX_BATCH_ITEMS** (default **1000**) — large lists are truncated server-side.
+- **MAX_REQUEST_BYTES** (default **1 MiB**) — best-effort size check using `Content-Length`; oversize requests are mirrored back with per-item `error: "request too large"`.
 
 #### Response schema additions
 - `risk_band`: qualitative band derived from model meta thresholds (low/medium/high). Thresholds are computed at train time from prediction quantiles and stored in `baseline_logreg_meta.json` under `risk_band_thresholds`.
@@ -204,7 +216,7 @@ curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch?join_graph=true&limit_
 ## Streamlit UI
 
 ### Model info (page `0_Model.py`)
-- Calls `/v1/model/info` to show **availability**, **trained_at**, **feature list**, **top weights**, and the **latest evaluation metrics**.
+- Calls `/v1/model/info` to show **availability**, **trained_at**, **feature list**, **top weights**, **`risk_band_thresholds`**, and the **latest evaluation metrics**.
 
 ### Datasets & Batch Scoring (page `1_Datasets.py`)
 - Shows **dataset availability** and **row counts** via `/health`.
@@ -349,6 +361,7 @@ pytest -q
 # - tests/test_model_explanations.py::test_predict_proba_and_contrib_linear_explanations
 # - tests/test_evaluate_baseline.py
 # - tests/test_api_batch_limit_top_factors.py
+# - tests/test_api_validate.py
 ```
 
 ---
@@ -409,8 +422,11 @@ WB_INELIGIBLE_PATH=data/curated/worldbank/ineligible.parquet
 OCDS_TENDERS_PATH=data/curated/ocds/tenders.parquet
 OCDS_AWARDS_PATH=data/curated/ocds/awards.parquet
 FEATURES_CACHE_DISABLE=false     # set true to bypass features parquet cache (dev)
-MODELS_DIR=models                 # optional; where model artifacts live
-METRICS_DIR=reports/metrics      # optional; where evaluation JSONs are stored
+DEFAULT_TOP_K=5                  # default top factors per item
+MAX_BATCH_ITEMS=1000             # truncate big batches
+MAX_REQUEST_BYTES=1048576        # 1 MiB; best-effort via Content-Length
+MODELS_DIR=models_data           # where model artifacts live
+METRICS_DIR=reports/metrics      # where evaluation JSONs are stored
 ```
 
 ---
