@@ -2,8 +2,8 @@
 
 Cloud-native, investigator-friendly analytics to surface integrity risks in public procurement using **public data** and **Google Gemini** for structured extraction.
 
-- **API:** FastAPI (`/health`, `/v1/score`, `/v1/extract/adverse-media`, `/v1/score/batch`)
-- **UI:** Streamlit demo (includes **Datasets & Batch Scoring** page with CSV upload/download)
+- **API:** FastAPI (`/health`, `/v1/score`, `/v1/extract/adverse-media`, `/v1/score/batch`, `/v1/model/info`)
+- **UI:** Streamlit demo (includes **Model info** and **Datasets & Batch Scoring** pages)
 - **ML Baseline:** Logistic Regression with SHAP-style linear contributions
 - **LLM:** Google GenAI SDK (Gemini) with strict, schema-validated JSON output
 - **Layout:** `src/` package (editable install)
@@ -61,6 +61,33 @@ GRAPH_METRICS_PATH=data/graph/metrics.parquet
 WB_INELIGIBLE_PATH=data/curated/worldbank/ineligible.parquet
 OCDS_TENDERS_PATH=data/curated/ocds/tenders.parquet
 OCDS_AWARDS_PATH=data/curated/ocds/awards.parquet
+```
+
+### Model info
+```
+GET /v1/model/info
+```
+Returns the currently deployed baseline model and recent evaluation:
+```jsonc
+{
+  "available": true,
+  "model_path": "models/baseline_logreg.joblib",
+  "meta_path": "models/baseline_logreg_meta.json",
+  "trained_at": "2025-09-20T12:34:56Z",
+  "feature_cols": ["award_concentration_by_buyer", "repeat_winner_ratio", "..."],
+  "class_weight": null,
+  "weights": {
+    "n_features": 5,
+    "top_weights": [
+      {"name": "repeat_winner_ratio", "weight": 1.25, "abs_weight": 1.25},
+      {"name": "amount_zscore_by_category", "weight": 0.72, "abs_weight": 0.72}
+    ]
+  },
+  "evaluation": {
+    "path": "reports/metrics/baseline_metrics_2025-09-20.json",
+    "metrics": { "auc": 0.71, "precision_at_10pct": 0.62, "...": "..." }
+  }
+}
 ```
 
 ### Risk score (simple demo)
@@ -126,11 +153,9 @@ curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch?join_graph=true" ^
 # → returns: { "items": [...], "provenance_id": "...", "used_model": true }
 ```
 
-**Swagger UI:** open `http://127.0.0.1:8000/docs` → `POST /v1/score/batch`.
-
-### Query parameters
+#### Query parameters
 - `join_graph` (bool, default **false**): If `true`, left-joins supplier-level graph metrics when `GRAPH_METRICS_PATH` exists.
-- `limit_top_factors` (int, **1–20**, default **5**): Caps the number of explanation factors returned per item. Only affects the length of `top_factors`; **risk_score is unchanged**.
+- `limit_top_factors` (int, **1–20**, default **5**): Caps the number of explanation factors per item. Only affects `top_factors`; **risk_score is unchanged**.
 
 **Example**
 ```bash
@@ -140,20 +165,60 @@ curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch?join_graph=true&limit_
   -d "{\"items\":[{\"award_id\":\"A1\"},{\"award_id\":\"A2\"}]}"
 ```
 
-### Performance
+#### Performance
 - **Features parquet caching**: The API caches the DataFrame loaded from `FEATURES_PATH` by `(path, mtime)` to avoid re-reading on every request.
   - Changes are picked up automatically when the file is replaced or its modification time updates.
   - Graph metrics parquet is smaller/infrequent and is read without caching.
+- **Disable cache (dev only):** set `FEATURES_CACHE_DISABLE=true` to bypass the features cache.
+
+#### Response schema additions
+- `risk_band`: qualitative band derived from model meta thresholds (low/medium/high). Thresholds are computed at train time from prediction quantiles and stored in `baseline_logreg_meta.json` under `risk_band_thresholds`.
+- `error`: per-item validation message when input is invalid; output still preserves 1:1 with inputs.
+
+**Response (list-in excerpt)**
+```jsonc
+[
+  {
+    "award_id": "A1",
+    "supplier_id": "S1",
+    "risk_score": 0.78,
+    "risk_band": "high",
+    "top_factors": [
+      {"name": "repeat_winner_ratio", "value": 0.92, "contribution": 1.15},
+      {"name": "amount_zscore_by_category", "value": 2.7, "contribution": 0.84}
+    ]
+  },
+  {
+    "award_id": null,
+    "supplier_id": null,
+    "risk_score": null,
+    "risk_band": null,
+    "top_factors": [],
+    "error": "award_id must be a non-empty string"
+  }
+]
+```
 
 ---
 
-## Streamlit — Datasets & Batch Scoring page
+## Streamlit UI
 
-Path: `app/ui/pages/1_Datasets.py`
+### Model info (page `0_Model.py`)
+- Calls `/v1/model/info` to show **availability**, **trained_at**, **feature list**, **top weights**, and the **latest evaluation metrics**.
 
-- Shows **dataset availability** and **row counts** by calling `/health`.
-- Lets you **upload a CSV** with an `award_id` column to call `/v1/score/batch` and view results
-  (plus a bar chart of highest risk). Supports **download** of scored results as CSV.
+### Datasets & Batch Scoring (page `1_Datasets.py`)
+- Shows **dataset availability** and **row counts** via `/health`.
+- Upload a CSV (`award_id`, optional `supplier_id`) → calls `/v1/score/batch`.
+- Controls:
+  - **Join graph metrics** toggle
+  - **Top factors** slider (1–20) → passes `limit_top_factors`
+  - **Risk band filter** (low/medium/high)
+- Panels:
+  - **Errors** table for any per-row validation issues
+  - **Scores table** (sortable)
+  - **Top factor summary** (first 3 factors/row for compactness)
+  - **Bar chart** of top 20 by risk score
+  - **Download** results as CSV
 
 Set the API base URL for the UI:
 ```
@@ -188,27 +253,11 @@ python -m procurement_risk_detection_ai.models.evaluate_baseline --features data
 ```
 
 **How batch scoring uses the model**
-- If `models/baseline_logreg.joblib` exists, `POST /v1/score/batch` will use it to compute:
+- If `models/baseline_logreg.joblib` exists, `POST /v1/score/batch` computes:
   - `risk_score` in [0,1]
+  - `risk_band` via thresholds saved in model meta (`risk_band_thresholds`)
   - `top_factors` — linear logit contributions per feature (`coef * value`, sorted by |contribution|; SHAP-style)
 - If no model is found, the endpoint **falls back** to intrinsic heuristic rules.
-
-**Response (list-in excerpt)**
-```jsonc
-[
-  {
-    "award_id": "A1",
-    "supplier_id": "S1",
-    "risk_score": 0.78,
-    "top_factors": [
-      {"name": "repeat_winner_ratio", "value": 0.92, "contribution": 1.15},
-      {"name": "amount_zscore_by_category", "value": 2.7, "contribution": 0.84}
-    ]
-  }
-]
-```
-
-> Tip: set `FEATURES_PATH` (and optionally `GRAPH_METRICS_PATH`) so batch can merge features (and graph metrics via `?join_graph=true`).
 
 ---
 
@@ -296,9 +345,10 @@ pip install --upgrade "networkx>=3.0"
 ```bash
 pytest -q
 # Key checks:
-# - tests/test_api_batch.py::test_batch_scores_with_graph  ✅ list-in → list-out, len matches
-# - tests/test_model_explanations.py::test_predict_proba_and_contrib_linear_explanations ✅ model + contributions
-# - tests/test_evaluate_baseline.py ✅ metrics keys and ranges
+# - tests/test_api_batch.py::test_batch_scores_with_graph
+# - tests/test_model_explanations.py::test_predict_proba_and_contrib_linear_explanations
+# - tests/test_evaluate_baseline.py
+# - tests/test_api_batch_limit_top_factors.py
 ```
 
 ---
@@ -308,12 +358,14 @@ pytest -q
 ```
 .github/workflows/                # CI
 app/ui/                           # Streamlit demo
-  pages/                          # 1_Datasets.py
+  pages/
+    0_Model.py                    # /v1/model/info view
+    1_Datasets.py                 # batch scoring page
 data/                             # raw/ & curated/ outputs (git-ignored except .gitkeep)
 docs/                             # architecture, notes
 llm/schemas/                      # JSON/Pydantic schemas
 src/procurement_risk_detection_ai/
-  app/api/                        # FastAPI app (health, batch, etc.)
+  app/api/                        # FastAPI app (health, batch, model_info)
   app/services/                   # scoring, provenance
   llm/                            # Gemini wrapper (structured output)
   models/                         # baseline & evaluation CLIs
@@ -356,6 +408,9 @@ GRAPH_METRICS_PATH=data/graph/metrics.parquet
 WB_INELIGIBLE_PATH=data/curated/worldbank/ineligible.parquet
 OCDS_TENDERS_PATH=data/curated/ocds/tenders.parquet
 OCDS_AWARDS_PATH=data/curated/ocds/awards.parquet
+FEATURES_CACHE_DISABLE=false     # set true to bypass features parquet cache (dev)
+MODELS_DIR=models                 # optional; where model artifacts live
+METRICS_DIR=reports/metrics      # optional; where evaluation JSONs are stored
 ```
 
 ---
