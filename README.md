@@ -154,14 +154,41 @@ curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch?join_graph=true" ^
 # → returns: { "items": [...], "provenance_id": "...", "used_model": true }
 ```
 
+#### Speed toggle: `explain=false`
+If you don’t need explanations, pass `explain=false`:
+```
+POST /v1/score/batch?explain=false
+This uses a **vectorized** model path (no per-row loops) and optionally a saved
+**calibrator** (Platt scaling) when present. You still get `risk_score` and `risk_band`
+but `top_factors` will be `[]`.
+```
+
+#### Metrics
+A Prometheus endpoint is available:
+```
+GET /metrics
+
+Counters/histograms:
+- `api_requests_total{endpoint,status}`
+- `request_latency_seconds{endpoint}`
+- `batch_scored_items_total{used_model,join_graph,explain}`
+
+```
+
 #### Query parameters
 - `join_graph` (bool, default **false**): If `true`, left-joins supplier-level graph metrics when `GRAPH_METRICS_PATH` exists.
 - `limit_top_factors` (int, **1–20**, default **5** or `DEFAULT_TOP_K`): Caps the number of explanation factors per item. Only affects `top_factors`; **risk_score is unchanged**.
+- `explain` (bool, default **true**): If `false`, the API **skips** per-item `top_factors` generation and returns **only** `risk_score` and `risk_band` (faster).
 
 **Example**
 ```bash
-# Envelope-in → Envelope-out, join graph + show top 3 factors per item
-curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch?join_graph=true&limit_top_factors=3" ^
+# Envelope-in → Envelope-out, join graph + top 3 factors + explanations
+curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch?join_graph=true&limit_top_factors=3&explain=true" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"items\":[{\"award_id\":\"A1\"},{\"award_id\":\"A2\"}]}"
+
+# Same request, but skip explanations to speed up:
+curl.exe -s -X POST "http://127.0.0.1:8000/v1/score/batch?join_graph=true&explain=false" ^
   -H "Content-Type: application/json" ^
   -d "{\"items\":[{\"award_id\":\"A1\"},{\"award_id\":\"A2\"}]}"
 ```
@@ -223,7 +250,8 @@ POST /v1/score/validate
 - Upload a CSV (`award_id`, optional `supplier_id`) → calls `/v1/score/batch`.
 - Controls:
   - **Join graph metrics** toggle
-  - **Top factors** slider (1–20) → passes `limit_top_factors`
+  - **Explain (top factors)** toggle (skip explanations for faster scoring)
+  - **Top factors** slider (1–20) → passes `limit_top_factors` (ignored when Explain is off)
   - **Risk band filter** (low/medium/high)
 - Panels:
   - **Errors** table for any per-row validation issues

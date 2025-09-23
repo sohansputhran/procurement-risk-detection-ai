@@ -116,8 +116,37 @@ def fit_baseline(df: pd.DataFrame, feature_cols: List[str]) -> LogisticRegressio
         "risk_band_thresholds": thresholds,
         "model_path": MODEL_PATH,
     }
-    _write_json(META_PATH, meta)
 
+    # --- Optional calibration (keeps LR artifact type unchanged) ---
+    # Gate with env to avoid surprising test changes
+    calibrate = str(os.getenv("CALIBRATE_PROBS", "false")).lower() in (
+        "1",
+        "true",
+        "yes",
+        "y",
+        "t",
+    )
+    calibrator_path = "models/baseline_calibrator.joblib"
+    calibration_method = "sigmoid"  # Platt scaling
+
+    if calibrate:
+        try:
+            from sklearn.calibration import CalibratedClassifierCV
+
+            # Important: cv='prefit' so we wrap the already-fitted LR
+            calibrator = CalibratedClassifierCV(
+                base_estimator=clf, cv="prefit", method=calibration_method
+            )
+            calibrator.fit(X, y)
+
+            joblib.dump(calibrator, calibrator_path)
+            meta["calibrator_path"] = calibrator_path
+            meta["calibration_method"] = calibration_method
+        except Exception as e:
+            # Non-fatal: keep training successful even if calibration fails
+            meta["calibration_error"] = str(e)
+
+    _write_json(META_PATH, meta)  # overwrite with calibrator info if any
     return clf
 
 
