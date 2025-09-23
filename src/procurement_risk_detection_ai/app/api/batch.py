@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
-from fastapi import APIRouter, Body, Query
+from fastapi import APIRouter, Body, Query, Request
 from pydantic import BaseModel, Field
 
 # ---- Pydantic v1/v2 compatible field validator alias ----
@@ -46,6 +46,13 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 def _env_int(name: str, default_val: int) -> int:
+    try:
+        return int(os.getenv(name, str(default_val)))
+    except Exception:
+        return default_val
+
+
+def _env_bytes(name: str, default_val: int) -> int:
     try:
         return int(os.getenv(name, str(default_val)))
     except Exception:
@@ -174,6 +181,7 @@ def _join_features(df_in: pd.DataFrame, join_graph: bool) -> pd.DataFrame:
     "/v1/score/batch", response_model=Union[List[BatchResponseItem], BatchResponse]
 )
 def batch_score(
+    request: Request,
     payload: Any = Body(...),
     join_graph: bool = Query(
         False, description="Join supplier graph metrics if available."
@@ -190,6 +198,46 @@ def batch_score(
     Preserves 1:1 input→output, annotating invalid rows with `error`.
     """
     started = __import__("time").time()
+    # Optional raw size guard via Content-Length (best-effort)
+    max_bytes = _env_bytes("MAX_REQUEST_BYTES", 1_048_576)  # 1 MiB default
+    cl = request.headers.get("content-length")
+    if cl and cl.isdigit() and int(cl) > max_bytes:
+        # Shape mirroring with errors
+        input_was_list = isinstance(payload, list)
+        items_raw = payload.get("items") if isinstance(payload, dict) else payload
+        if not isinstance(items_raw, list):
+            items_raw = []
+        out_items = [
+            {
+                "award_id": (
+                    (it or {}).get("award_id") if isinstance(it, dict) else None
+                ),
+                "supplier_id": (
+                    (it or {}).get("supplier_id") if isinstance(it, dict) else None
+                ),
+                "risk_score": None,
+                "risk_band": None,
+                "top_factors": [],
+                "error": "request too large",
+            }
+            for it in items_raw
+        ]
+        prov_id = log_provenance(
+            endpoint="/v1/score/batch",
+            payload={"_too_large": True},
+            started_at=started,
+            status="error",
+            error="request too large",
+            num_items=len(out_items),
+        )
+        return (
+            out_items
+            if input_was_list
+            else BatchResponse(
+                items=out_items, provenance_id=prov_id, used_model=is_model_available()
+            )
+        )
+
     L = _limits()
     if limit_top_factors is None:
         limit_top_factors = L["DEFAULT_TOP_K"]
