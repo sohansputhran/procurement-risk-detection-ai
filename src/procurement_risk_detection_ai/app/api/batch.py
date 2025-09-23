@@ -396,3 +396,127 @@ def batch_score(
             items=out_items, provenance_id=prov_id, used_model=used_model_flag
         )
     )
+
+
+# ----------------------------- Validate-only route -----------------------------
+
+
+class ValidateResponseItem(BaseModel):
+    award_id: Optional[str] = None
+    supplier_id: Optional[str] = None
+    valid: bool = False
+    error: Optional[str] = None
+
+
+class ValidateResponse(BaseModel):
+    items: List[ValidateResponseItem]
+    provenance_id: Optional[str] = None
+
+
+@router.post(
+    "/v1/score/validate",
+    response_model=Union[List[ValidateResponseItem], ValidateResponse],
+)
+def batch_validate(payload: Any = Body(...)):
+    """
+    Validate-only: checks schema (award_id non-empty) and that award_id exists in FEATURES_PATH.
+    Mirrors input shape (list→list, envelope→envelope). Does NOT score.
+    """
+    started = __import__("time").time()
+    # Normalize input and remember original shape for mirroring
+    input_was_list = isinstance(payload, list)
+    items_raw = payload.get("items") if isinstance(payload, dict) else payload
+    if not isinstance(items_raw, list):
+        items_raw = []
+
+    # Schema validation (same behavior as batch_score)
+    validated: List[Dict[str, Any]] = []
+    errors_by_idx: Dict[int, str] = {}
+    for i, obj in enumerate(items_raw):
+        try:
+            model = BatchItem.parse_obj(obj if isinstance(obj, dict) else {})
+            validated.append(
+                {"award_id": model.award_id, "supplier_id": model.supplier_id}
+            )
+        except Exception as ve:
+            validated.append(
+                {
+                    "award_id": (
+                        (obj or {}).get("award_id") if isinstance(obj, dict) else None
+                    ),
+                    "supplier_id": (
+                        (obj or {}).get("supplier_id")
+                        if isinstance(obj, dict)
+                        else None
+                    ),
+                }
+            )
+            errors_by_idx[i] = str(ve)
+
+    # Feature existence check
+    P = _paths()
+    df_feat = _load_parquet_cached(P["FEATURES_PATH"])
+    existing_ids = set()
+    if not df_feat.empty and "award_id" in df_feat.columns:
+        try:
+            existing_ids = set(df_feat["award_id"].astype(str).dropna().tolist())
+        except Exception:
+            pass
+
+    out_items: List[Dict[str, Any]] = []
+    for idx, row in enumerate(validated):
+        err = errors_by_idx.get(idx)
+        aid = row.get("award_id")
+        if err:
+            out_items.append(
+                {
+                    "award_id": aid,
+                    "supplier_id": row.get("supplier_id"),
+                    "valid": False,
+                    "error": err,
+                }
+            )
+            continue
+        if not existing_ids:
+            out_items.append(
+                {
+                    "award_id": aid,
+                    "supplier_id": row.get("supplier_id"),
+                    "valid": False,
+                    "error": "no features found",
+                }
+            )
+        elif str(aid) not in existing_ids:
+            out_items.append(
+                {
+                    "award_id": aid,
+                    "supplier_id": row.get("supplier_id"),
+                    "valid": False,
+                    "error": "award_id not found in features",
+                }
+            )
+        else:
+            out_items.append(
+                {
+                    "award_id": aid,
+                    "supplier_id": row.get("supplier_id"),
+                    "valid": True,
+                    "error": None,
+                }
+            )
+
+    prov_id = log_provenance(
+        endpoint="/v1/score/validate",
+        payload=payload,
+        started_at=started,
+        status="ok",
+        num_items=len(out_items),
+    )
+    return (
+        out_items
+        if input_was_list
+        else ValidateResponse(items=out_items, provenance_id=prov_id)
+    )
+
+
+# ----------------------------- Model info route (for UI) -----------------------------
