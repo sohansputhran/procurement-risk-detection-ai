@@ -52,13 +52,17 @@ st.write(
     "Toggle 'Join graph metrics' to attach supplier graph features if available."
 )
 
-join_graph = st.toggle("Join graph metrics (if available)", value=False)
-limit_top_factors = st.slider(
-    "Top factors to show per item", min_value=1, max_value=20, value=5
-)
-timeout_sec = st.number_input(
-    "Request timeout (seconds)", min_value=5, max_value=300, value=60, step=5
-)
+c1, c2, c3 = st.columns([1, 1, 1])
+with c1:
+    join_graph = st.toggle("Join graph metrics", value=False)
+with c2:
+    limit_top_factors = st.slider(
+        "Top factors per item", min_value=1, max_value=20, value=5
+    )
+with c3:
+    timeout_sec = st.number_input(
+        "Request timeout (sec)", min_value=5, max_value=300, value=60, step=5
+    )
 
 up = st.file_uploader("CSV file", type=["csv"], accept_multiple_files=False)
 if up is not None:
@@ -102,59 +106,79 @@ if up is not None:
             used_model = None
 
         out = pd.DataFrame(items)
-        if out.empty:
-            st.warning("No results returned from API.")
-            st.stop()
 
-        st.success(
-            (
-                f"Scored {len(out)} rows"
-                + (f" • provenance_id={provenance_id}" if provenance_id else "")
-                + (f" • used_model={used_model}" if used_model is not None else "")
+        # Feedback / header
+        if used_model is None:
+            st.success(f"Scored {len(out)} rows")
+        else:
+            st.success(
+                (
+                    f"Scored {len(out)} rows"
+                    + (f" • provenance_id={provenance_id}" if provenance_id else "")
+                    + (f" • used_model={used_model}" if used_model is not None else "")
+                )
             )
+
+        # Errors panel (keep 1:1 shape; show any items with 'error')
+        if "error" in out.columns and out["error"].notna().any():
+            st.warning("Some rows had validation issues:")
+            st.dataframe(
+                out.loc[out["error"].notna(), ["award_id", "supplier_id", "error"]],
+                use_container_width=True,
+            )
+
+        # Optional risk band filter
+        band_values = ["low", "medium", "high"]
+        selected_bands = st.multiselect(
+            "Filter by risk_band", options=band_values, default=band_values
         )
+        filtered = out.copy()
+        if "risk_band" in filtered.columns:
+            filtered = filtered[filtered["risk_band"].isin(selected_bands)]
 
         # Primary scores table
         score_cols = [
-            c for c in ["award_id", "supplier_id", "risk_score"] if c in out.columns
+            c
+            for c in ["award_id", "supplier_id", "risk_band", "risk_score"]
+            if c in filtered.columns
         ]
-        st.dataframe(
-            out[score_cols].sort_values("risk_score", ascending=False),
-            use_container_width=True,
-        )
+        if score_cols:
+            st.dataframe(
+                filtered[score_cols].sort_values("risk_score", ascending=False),
+                use_container_width=True,
+            )
 
         # Compact top-factor summary
-        with st.expander("Show top factor details per award (top 3)"):
-            rows = []
-            for _, r in out.iterrows():
-                tf = r.get("top_factors") or []
-                if isinstance(tf, list):
-                    tf = tf[:3]
-                else:
-                    tf = []
-                row = {
-                    "award_id": r.get("award_id"),
-                    "supplier_id": r.get("supplier_id"),
-                }
-                for i in range(3):
-                    if i < len(tf) and isinstance(tf[i], dict):
-                        name = tf[i].get("name")
-                        value = tf[i].get("value")
-                        contrib = tf[i].get("contribution")
-                        if contrib is not None:
-                            row[f"factor{i+1}"] = f"{name} (contrib={contrib})"
-                        else:
-                            row[f"factor{i+1}"] = f"{name} (value={value})"
-                    else:
-                        row[f"factor{i+1}"] = ""
-                rows.append(row)
-            tf_df = pd.DataFrame(rows)
-            st.dataframe(tf_df, use_container_width=True)
+        if "top_factors" in filtered.columns:
+            with st.expander("Show top factor details per award (top N)"):
+                rows = []
+                for _, r in filtered.iterrows():
+                    tf = r.get("top_factors") or []
+                    if not isinstance(tf, list):
+                        tf = []
+                    row_d = {
+                        "award_id": r.get("award_id"),
+                        "supplier_id": r.get("supplier_id"),
+                    }
+                    # show up to 3 columns for compactness
+                    for i in range(min(3, len(tf))):
+                        if isinstance(tf[i], dict):
+                            name = tf[i].get("name")
+                            contrib = tf[i].get("contribution")
+                            value = tf[i].get("value")
+                            row_d[f"factor{i+1}"] = (
+                                f"{name} (contrib={contrib})"
+                                if contrib is not None
+                                else f"{name} (value={value})"
+                            )
+                    rows.append(row_d)
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
         # Simple chart of top 20 by risk_score
         try:
-            if "risk_score" in out.columns:
-                top = out.sort_values("risk_score", ascending=False).head(20)
+            if "risk_score" in filtered.columns and not filtered.empty:
+                top = filtered.sort_values("risk_score", ascending=False).head(20)
                 st.bar_chart(top.set_index("award_id")["risk_score"])
         except Exception:
             pass
