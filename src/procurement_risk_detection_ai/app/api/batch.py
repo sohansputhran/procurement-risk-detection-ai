@@ -6,7 +6,23 @@ from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
 from fastapi import APIRouter, Body, Query
-from pydantic import BaseModel, Field, ValidationError, validator
+from pydantic import BaseModel, Field
+
+# v1/v2 compatible field validator alias
+try:  # Pydantic v2
+    from pydantic import field_validator  # type: ignore
+except Exception:  # Pydantic v1 fallback
+    from pydantic import validator as _v1_validator  # type: ignore
+
+    def field_validator(field_name: str, *, mode: str = "after"):
+        # mimic v2 API using v1's validator()
+        pre = mode == "before"
+
+        def _decorator(fn):
+            return _v1_validator(field_name, pre=pre, allow_reuse=True)(fn)
+
+        return _decorator
+
 
 from procurement_risk_detection_ai.app.services.scoring import (
     is_model_available,
@@ -36,7 +52,8 @@ class BatchItem(BaseModel):
     award_id: str = Field(..., description="Award id; must exist in features parquet")
     supplier_id: Optional[str] = None
 
-    @validator("award_id")
+    @field_validator("award_id")  # works in v2; maps to v1 under the hood
+    @classmethod
     def _non_empty(cls, v: str) -> str:
         if v is None or str(v).strip() == "":
             raise ValueError("award_id must be a non-empty string")
@@ -173,7 +190,7 @@ def batch_score(
             validated.append(
                 {"award_id": model.award_id, "supplier_id": model.supplier_id}
             )
-        except ValidationError as ve:
+        except Exception as ve:
             validated.append(
                 {
                     "award_id": (
