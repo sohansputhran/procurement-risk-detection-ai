@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
+from procurement_risk_detection_ai.config.settings import get_settings
 
 router = APIRouter()
 
@@ -42,6 +43,7 @@ class ModelInfo(BaseModel):
     trained_at: Optional[str] = None
     feature_cols: Optional[List[str]] = None
     class_weight: Optional[Dict[str, float]] = None
+    risk_band_thresholds: Optional[Dict[str, float]] = None
     weights: ModelWeights = Field(default_factory=ModelWeights)
     evaluation: Optional[EvaluationInfo] = None
 
@@ -56,8 +58,8 @@ def _read_json_if_exists(path: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _latest_metrics_path() -> Optional[str]:
-    paths = sorted(glob.glob(os.path.join(METRICS_DIR, "baseline_metrics_*.json")))
+def _latest_metrics_path(metrics_dir: str) -> Optional[str]:
+    paths = sorted(glob.glob(os.path.join(metrics_dir, "baseline_metrics_*.json")))
     return paths[-1] if paths else None
 
 
@@ -101,16 +103,18 @@ def _compute_top_weights(
 
 @router.get("/v1/model/info", response_model=ModelInfo)
 def get_model_info() -> ModelInfo:
-    model_exists = Path(MODEL_PATH).exists()
-    meta = _read_json_if_exists(META_PATH) or {}
+    s = get_settings()
+    model_exists = Path(s.MODEL_PATH).exists()
+    meta = _read_json_if_exists(s.MODEL_META_PATH) or {}
 
     feature_cols: Optional[List[str]] = meta.get("feature_cols")
     trained_at: Optional[str] = meta.get("trained_at") or meta.get("timestamp")
     class_weight = meta.get("class_weight")
+    thresholds = meta.get("risk_band_thresholds")
 
-    weights = _compute_top_weights(MODEL_PATH, feature_cols)
+    weights = _compute_top_weights(s.MODEL_PATH, feature_cols)
 
-    eval_path = _latest_metrics_path()
+    eval_path = _latest_metrics_path(s.METRICS_DIR)
     eval_metrics = _read_json_if_exists(eval_path) if eval_path else None
     evaluation = (
         EvaluationInfo(path=eval_path, metrics=eval_metrics or {})
@@ -120,11 +124,12 @@ def get_model_info() -> ModelInfo:
 
     return ModelInfo(
         available=bool(model_exists),
-        model_path=MODEL_PATH if model_exists else None,
-        meta_path=META_PATH if Path(META_PATH).exists() else None,
+        model_path=s.MODEL_PATH if model_exists else None,
+        meta_path=s.MODEL_META_PATH if Path(s.MODEL_META_PATH).exists() else None,
         trained_at=trained_at,
         feature_cols=feature_cols,
         class_weight=class_weight,
+        risk_band_thresholds=thresholds,
         weights=weights,
         evaluation=evaluation,
     )
