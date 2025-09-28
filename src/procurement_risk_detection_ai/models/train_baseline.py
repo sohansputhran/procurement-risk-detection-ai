@@ -67,13 +67,17 @@ def main():
         from pathlib import Path
         import json
 
-        meta_path = os.getenv("MODEL_META_PATH", "models/baseline_logreg_meta.json")
+        meta_path = os.getenv(
+            "MODEL_META_PATH", "models_data/baseline_logreg_meta.json"
+        )
         Path(meta_path).write_text(json.dumps(meta, indent=2), encoding="utf-8")
         print("[train] appended last_evaluation to meta JSON")
     except Exception as e:
         print(f"[train][warn] evaluation failed: {e}")
 
-    print("[train] saved model to models/baseline_logreg.joblib and updated meta json")
+    print(
+        "[train] saved model to models_data/baseline_logreg.joblib and updated meta json"
+    )
     return 0
 
 
