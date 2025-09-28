@@ -21,7 +21,7 @@ FEATURE_COLS_DEFAULT = [
     "time_to_award_days",
 ]
 
-MODELS_DIR = os.getenv("MODELS_DIR", "models")
+MODELS_DIR = os.getenv("MODELS_DIR", "models_data")
 MODEL_PATH = os.getenv("MODEL_PATH", f"{MODELS_DIR}/baseline_logreg.joblib")
 META_PATH = os.getenv("MODEL_META_PATH", f"{MODELS_DIR}/baseline_logreg_meta.json")
 
